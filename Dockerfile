@@ -1,4 +1,4 @@
-FROM techtrader/python-ta-lib:3.11
+FROM ghcr.io/ukewea/python-talib:ubuntu24.04-python3.12-20240915
 
 WORKDIR /app
 
