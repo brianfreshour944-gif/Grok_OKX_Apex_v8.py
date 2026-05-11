@@ -1,7 +1,6 @@
+
 FROM python:3.10-slim
-ENV PYTHONUNBUFFERED=1
-RUN pip install ccxt pandas numpy torch pandas_ta tqdm --index-url https://download.pytorch.org/whl/cpu
 WORKDIR /app
 COPY . .
-# We run the bot by default
-CMD ["python", "ultimate_bot.py"]
+RUN pip install --no-cache-dir ccxt pandas numpy pandas_ta tqdm
+CMD ["python3", "Grok_OKX_Apex_v8.py"]
