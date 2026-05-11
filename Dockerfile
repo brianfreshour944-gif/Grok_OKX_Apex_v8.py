@@ -1,16 +1,17 @@
-# We upgraded to 3.11 to satisfy the pandas_ta requirements
-FROM python:3.11-slim
+# We use 3.10 because it's the most stable "sweet spot" for pandas_ta
+FROM python:3.10-slim
 
 WORKDIR /app
 
-# Install system dependencies first
+# Install basic system tools that pandas_ta sometimes needs to build
 RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 COPY . .
 
-# We install specific versions to prevent the "No matching distribution" error
-RUN pip install --no-cache-dir ccxt pandas numpy pandas_ta tqdm
+# We install them one by one to make sure pandas_ta doesn't trip over the others
+RUN pip install --no-cache-dir ccxt pandas numpy tqdm
+RUN pip install --no-cache-dir pandas_ta
 
 CMD ["python3", "Grok_OKX_Apex_v8.py"]
