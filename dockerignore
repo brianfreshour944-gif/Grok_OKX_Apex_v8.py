@@ -1,0 +1,39 @@
+# Large directories
+node_modules/
+venv/
+env/
+.venv/
+__pycache__/
+*.pyc
+.git/
+.vscode/
+.idea/
+
+# Large file types
+*.zip
+*.tar
+*.gz
+*.mp4
+*.avi
+*.mov
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.mp3
+*.wav
+*.db
+*.sqlite
+*.parquet
+
+# Data folders
+data/
+datasets/
+models/
+outputs/
+logs/*.log
+
+# Virtual environments
+Lib/
+Scripts/
+include/
