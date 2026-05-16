@@ -51,7 +51,7 @@ class GrokGQA_Transformer(nn.Module):
         return self.head(x.mean(dim=1))
 
 class MLPredictor:
-    def __init__(self, model_path="grok_gqa_v9_best.pth", seq_len=512):
+    def __init__(self, model_path="grok_gqa_v8_best.pth", seq_len=512):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = GrokGQA_Transformer(seq_len=seq_len).to(self.device)
         self.model_path = model_path
@@ -64,11 +64,8 @@ class MLPredictor:
             self.model.eval()
 
     def predict(self, df):
-        # Logic to convert dataframe to tensor and run model
         try:
-            # Taking last 512 rows as specified in seq_len
             feature_cols = ['open','high','low','close','volume','returns','vol_14','rsi','macd','atr','bb_width']
-            # Ensure all columns exist, if not, return neutral 0.5
             if not all(col in df.columns for col in feature_cols): return 0.5
             
             x = torch.tensor(df[feature_cols].tail(512).values, dtype=torch.float32).unsqueeze(0).to(self.device)
