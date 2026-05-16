@@ -1,77 +1,13 @@
-# Python
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-venv/
-env/
-.venv/
-ENV/
-env.bak/
-venv.bak/
-
-# Git
+*.pyc
+*.pyo
+*.pyd
 .git/
 .gitignore
-.gitattributes
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# Logs and databases
+venv/
+.venv/
+env/
 *.log
-*.sql
-*.sqlite
-*.db
-
-# Large data files
 *.csv
-*.parquet
-*.feather
-*.h5
-*.pkl
-*.pickle
-*.joblib
-
-# Models
-*.h5
-*.pth
-*.pt
-*.onnx
-*.pb
-
-# Images and media
-*.jpg
-*.jpeg
-*.png
-*.gif
-*.mp4
-*.avi
-*.mov
-*.mp3
-*.wav
-
-# Archives
-*.zip
-*.tar
-*.gz
-*.rar
-*.7z
-
-# Jupyter
-.ipynb_checkpoints/
-*.ipynb
-
-# OS
-.DS_Store
-Thumbs.db
-desktop.ini
-
-# OctoBot specific (if present)
-user/logs/
-tentacles/
-*.tentacle
+*.db
+*.sqlite
