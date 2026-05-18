@@ -17,7 +17,8 @@ class GrokApexIroncladBot:
     def __init__(self, paper_mode: bool = True):
         self.broker = GrokOKXBroker(paper_mode=paper_mode)
         self.symbols = ['BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT']
-        self.ml = MLPredictor(model_path="grok_gqa_v9_best.pt", seq_len=512) # Kept unified with .pt extension
+        # Set to look for your newly verified v9 weights file
+        self.ml = MLPredictor(model_path="grok_gqa_v9_best.pth", seq_len=512)
         self.positions = {}
         self.trades = []
         self.equity_curve = []
@@ -88,8 +89,9 @@ class GrokApexIroncladBot:
                 for symbol in self.symbols:
                     try:
                         ticker = await exchange.watch_ticker(symbol)
-                        # FIXED: Shifted from '15m' to '5m' to sync up with your Transformer training architecture!
-                        ohlcv = await exchange.fetch_ohlcv(symbol, '5m', limit=600)
+                        
+                        # 📈 FIXED: Shifted from '15m' to '5m' timeframe and set sequence limit to 512
+                        ohlcv = await exchange.fetch_ohlcv(symbol, '5m', limit=512)
                         df = pd.DataFrame(ohlcv, columns=['ts', 'open', 'high', 'low', 'close', 'volume'])
                         
                         # Basic feature engineering for the predictor
@@ -161,6 +163,7 @@ class GrokApexIroncladBot:
             except Exception as e:
                 logger.error(f"Main loop error: {e}")
                 
+            # Sleep interval for real-time websocket check heartbeat
             await asyncio.sleep(15)
         
         await exchange.close()
@@ -172,7 +175,9 @@ class GrokApexIroncladBot:
 
 
 if __name__ == "__main__":
+    # Read paper_mode from environment variable (default to True/paper trading)
     paper_mode = os.getenv('PAPER_MODE', 'true').lower() == 'true'
+    
     bot = GrokApexIroncladBot(paper_mode=paper_mode)
     
     try:
