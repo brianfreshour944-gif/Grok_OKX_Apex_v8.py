@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import os
 
 class GQA_TransformerBlock(nn.Module):
     def __init__(self, embed_dim=128, num_q_heads=16, num_kv_heads=4, dropout=0.1):
@@ -47,29 +48,37 @@ class GrokGQA_Transformer(nn.Module):
     
     def forward(self, x):
         x = self.embed(x) + self.pos_enc[:, :x.shape[1]]
-        for block in self.blocks: x = block(x)
+        for block in self.blocks:
+            x = block(x)
         return self.head(x.mean(dim=1))
 
 class MLPredictor:
-    def __init__(self, model_path="grok_gqa_v8_best.pth", seq_len=512):
+    def __init__(self, model_path="grok_gqa_v9_best.pth", seq_len=512):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = GrokGQA_Transformer(seq_len=seq_len).to(self.device)
         self.model_path = model_path
         self.load_model()
 
     def load_model(self):
-        import os
         if os.path.exists(self.model_path):
             self.model.load_state_dict(torch.load(self.model_path, map_location=self.device))
             self.model.eval()
+            print(f"✅ Loaded model from {self.model_path}")
+        else:
+            print(f"⚠️ Model file {self.model_path} not found. Using default predictions.")
 
     def predict(self, df):
         try:
-            feature_cols = ['open','high','low','close','volume','returns','vol_14','rsi','macd','atr','bb_width']
-            if not all(col in df.columns for col in feature_cols): return 0.5
+            feature_cols = ['open', 'high', 'low', 'close', 'volume', 'returns', 'vol_14', 'rsi', 'macd', 'atr', 'bb_width']
+            
+            # Check if all columns exist, if not create defaults
+            for col in feature_cols:
+                if col not in df.columns:
+                    df[col] = 0.5 if col in ['rsi', 'macd', 'atr', 'bb_width'] else 0.0
             
             x = torch.tensor(df[feature_cols].tail(512).values, dtype=torch.float32).unsqueeze(0).to(self.device)
             with torch.no_grad():
                 return self.model(x).item()
-        except:
+        except Exception as e:
+            print(f"Prediction error: {e}")
             return 0.5
