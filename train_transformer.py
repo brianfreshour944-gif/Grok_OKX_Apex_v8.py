@@ -25,7 +25,7 @@ class FinancialTimeSeriesDataset(Dataset):
     
     def _prepare_data(self, df):
         # Create target: future return after horizon
-        df = df.copy()
+        df = df.copy(
         df['future_return'] = df['close'].pct_change(self.target_horizon).shift(-self.target_horizon)
         df['label'] = (df['future_return'] > 0).astype(float)  # Binary bullish probability target
         
