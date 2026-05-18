@@ -18,14 +18,14 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(
 logger = logging.getLogger(__name__)
 
 class FinancialTimeSeriesDataset(Dataset):
-    def __init__(self, df, seq_len=512, target_horizon=8):
+    def __init__(self, df, seq_len=128, target_horizon=8):
         self.seq_len = seq_len
         self.target_horizon = target_horizon
         self.data, self.labels = self._prepare_data(df)
     
     def _prepare_data(self, df):
         # Create target: future return after horizon
-        df = df.copy(
+        df = df.copy()
         df['future_return'] = df['close'].pct_change(self.target_horizon).shift(-self.target_horizon)
         df['label'] = (df['future_return'] > 0).astype(float)  # Binary bullish probability target
         
@@ -38,6 +38,7 @@ class FinancialTimeSeriesDataset(Dataset):
             import pandas_ta as ta
             df['rsi'] = ta.rsi(df['close'], 14)
             df['macd'] = ta.macd(df['close'])['MACD_12_26_9']
+
             df['atr'] = ta.atr(df['high'], df['low'], df['close'], 14)
             df['bb_width'] = 0.05 # Add fallback placeholder to match inference layout
         except:
@@ -47,7 +48,7 @@ class FinancialTimeSeriesDataset(Dataset):
             df['bb_width'] = 0.05
         
         feature_cols = features + ['returns','vol_14','rsi','macd','atr','bb_width']
-        data = df[feature_cols].fillna(method='bfill').fillna(0).values
+        data = df[feature_cols].bfill().fillna(0).values
         labels = df['label'].fillna(0).values
         
         return data, labels
@@ -61,7 +62,7 @@ class FinancialTimeSeriesDataset(Dataset):
         return torch.tensor(X, dtype=torch.float32), torch.tensor(y, dtype=torch.float32)
 
 
-def fetch_historical_data(symbol='BTC/USDT:USDT', timeframe='15m', limit=20000):
+def fetch_historical_data(symbol='BTC/USDT:USDT', timeframe='5m', limit=20000):
     """Download large historical dataset"""
     logger.info(f"Downloading {limit} candles for {symbol}...")
     exchange = ccxt.okx({'enableRateLimit': True})
@@ -73,7 +74,7 @@ def fetch_historical_data(symbol='BTC/USDT:USDT', timeframe='15m', limit=20000):
 
 
 def train_model(epochs=50, batch_size=32, lr=1e-4, seq_len=512):
-    df = fetch_historical_data(limit=25000)  # ~6-8 months of 15m data
+    df = fetch_historical_data(limit=25000)  # ~6-8 months of 5m data
     
     # Split train/val
     train_size = int(len(df) * 0.8)
@@ -91,13 +92,13 @@ def train_model(epochs=50, batch_size=32, lr=1e-4, seq_len=512):
     model = GrokGQA_Transformer(input_features=11, embed_dim=128, num_layers=6, seq_len=seq_len).to(device)
     criterion = nn.BCELoss()
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5, verbose=True)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5,)
     
     best_val_loss = float('inf')
     patience = 10
     patience_counter = 0
     
-    logger.info(f"🚀 Starting Robust Training on {device.upper()}...")
+    logger.info(f"🚀 Starting Robust Training on {str(device).upper()}...")
     
     for epoch in range(epochs):
         model.train()
@@ -151,9 +152,9 @@ if __name__ == "__main__":
         epochs=80,           # Set higher for deep optimization
         batch_size=16,       # Low batch size prevents RAM overruns in Colab
         lr=3e-4,
-        seq_len=512
+        seq_len=32
     )
     
     # Quick test prediction validation
-    predictor = MLPredictor(model_path="grok_gqa_v9_best.pth")
+    predictor = MLPredictor(model_path="grok_gqa_v9_best.pt")
     logger.info("✅ Training script completely aligned. Ready to push to GitHub!")
