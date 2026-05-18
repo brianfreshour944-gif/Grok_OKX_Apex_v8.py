@@ -39,7 +39,7 @@ class GQA_TransformerBlock(nn.Module):
         return x
 
 class GrokGQA_Transformer(nn.Module):
-    def __init__(self, input_features=11, embed_dim=128, num_layers=8, seq_len=512):
+    def __init__(self, input_features=11, embed_dim=128, num_layers=8, seq_len=32):
         super().__init__()
         self.embed = nn.Linear(input_features, embed_dim)
         self.pos_enc = nn.Parameter(torch.randn(1, seq_len, embed_dim))
@@ -53,7 +53,7 @@ class GrokGQA_Transformer(nn.Module):
         return self.head(x.mean(dim=1))
 
 class MLPredictor:
-    def __init__(self, model_path="grok_gqa_v9_best.pth", seq_len=512):
+    def __init__(self, model_path="grok_gqa_v9_best.pth", seq_len=32):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = GrokGQA_Transformer(seq_len=seq_len).to(self.device)
         self.model_path = model_path

@@ -18,7 +18,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(
 logger = logging.getLogger(__name__)
 
 class FinancialTimeSeriesDataset(Dataset):
-    def __init__(self, df, seq_len=128, target_horizon=8):
+    def __init__(self, df, seq_len=32, target_horizon=8):
         self.seq_len = seq_len
         self.target_horizon = target_horizon
         self.data, self.labels = self._prepare_data(df)
@@ -73,7 +73,7 @@ def fetch_historical_data(symbol='BTC/USDT:USDT', timeframe='5m', limit=20000):
     return df
 
 
-def train_model(epochs=50, batch_size=32, lr=1e-4, seq_len=512):
+def train_model(epochs=50, batch_size=32, lr=1e-4, seq_len=32):
     df = fetch_historical_data(limit=25000)  # ~6-8 months of 5m data
     
     # Split train/val
@@ -89,7 +89,7 @@ def train_model(epochs=50, batch_size=32, lr=1e-4, seq_len=512):
     
     # FIX 1: Set input_features to 11 to match ml_predictor structure exactly
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = GrokGQA_Transformer(input_features=11, embed_dim=128, num_layers=6, seq_len=seq_len).to(device)
+    model = GrokGQA_Transformer(input_features=11, embed_dim=128, num_layers=8, seq_len=seq_len).to(device)
     criterion = nn.BCELoss()
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5,)
@@ -156,5 +156,5 @@ if __name__ == "__main__":
     )
     
     # Quick test prediction validation
-    predictor = MLPredictor(model_path="grok_gqa_v9_best.pt")
+    predictor = MLPredictor(model_path="grok_gqa_v9_best.pth")
     logger.info("✅ Training script completely aligned. Ready to push to GitHub!")
