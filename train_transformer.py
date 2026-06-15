@@ -184,15 +184,49 @@ def sell_largest_position():
 
 def execute_trade(bot_name, symbol, side, qty):
     try:
+        # 1. Submit to Alpaca
         order = trading_client.submit_order(
             order_data=MarketOrderRequest(
                 symbol=symbol, qty=qty, side=side, time_in_force=TimeInForce.GTC
             )
         )
-        logger.info(
-            f"✅ Placed {side.value} order for {symbol} | "
-            f"Qty: {qty:.6f} | Order ID: {order.id}"
-        )
+        logger.info(f"✅ Placed {side.value} order for {symbol} | Order ID: {order.id}")
+
+        # 2. IF IT IS A SELL, Calculate and Record P&L
+        if side == OrderSide.SELL:
+            # Connect to DB to get the last buy price
+            conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+            cur = conn.cursor()
+            
+            # Fetch the most recent BUY price for this symbol to calculate P&L
+            cur.execute("""
+                SELECT price, fee 
+                FROM trades 
+                WHERE symbol = %s AND side = 'BUY' 
+                ORDER BY timestamp DESC LIMIT 1
+            """, (symbol,))
+            
+            last_buy = cur.fetchone()
+            
+            if last_buy:
+                buy_price = float(last_buy[0])
+                prev_fee = float(last_buy[1])
+                sell_price = float(order.filled_avg_price) # Using actual filled price
+                
+                # P&L Math
+                realized_pnl = (sell_price - buy_price) * qty
+                fee_paid = prev_fee + float(order.filled_avg_price) * qty * 0.001 # Assuming 0.1% fee
+                
+                # Save the "Truth" to the DB
+                cur.execute("""
+                    INSERT INTO trades (bot_name, symbol, side, price, quantity, realized_pnl, fee_paid)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """, (bot_name, symbol, 'SELL', sell_price, qty, realized_pnl, fee_paid))
+                conn.commit()
+            
+            cur.close()
+            conn.close()
+
         return order
     except Exception as e:
         logger.error(f"Trade execution failed for {symbol}: {e}")
@@ -370,7 +404,19 @@ async def run_trading_mode(bot_name):
                                 f"(${MAX_PORTFOLIO_VALUE - running_portfolio_value:.2f} remaining). "
                                 f"No more buys this cycle."
                             )
-                            buys_allowed = False
+              if execute_trade(bot_name, symbol, OrderSide.BUY, qty):
+    # Log the BUY into your database
+    conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO trades (bot_name, symbol, side, price, quantity)
+        VALUES (%s, %s, %s, %s, %s)
+    """, (bot_name, symbol, 'BUY', current_price, qty))
+    conn.commit()
+    cur.close()
+    conn.close()
+    
+    # ... rest of your existing cooldown/logic ...              buys_allowed = False
 
                 await asyncio.sleep(2)  # small pause between symbol evaluations
 
