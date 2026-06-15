@@ -183,8 +183,9 @@ def sell_largest_position():
 
 
 def execute_trade(bot_name, symbol, side, qty):
+    """Submit order to Alpaca and record trade in database."""
     try:
-        # 1. Submit to Alpaca
+        # Submit to Alpaca
         order = trading_client.submit_order(
             order_data=MarketOrderRequest(
                 symbol=symbol, qty=qty, side=side, time_in_force=TimeInForce.GTC
@@ -192,40 +193,16 @@ def execute_trade(bot_name, symbol, side, qty):
         )
         logger.info(f"✅ Placed {side.value} order for {symbol} | Order ID: {order.id}")
 
-        # 2. IF IT IS A SELL, Calculate and Record P&L
-        if side == OrderSide.SELL:
-            # Connect to DB to get the last buy price
-            conn = psycopg2.connect(os.getenv("DATABASE_URL"))
-            cur = conn.cursor()
-            
-            # Fetch the most recent BUY price for this symbol to calculate P&L
-            cur.execute("""
-                SELECT price, fee 
-                FROM trades 
-                WHERE symbol = %s AND side = 'BUY' 
-                ORDER BY timestamp DESC LIMIT 1
-            """, (symbol,))
-            
-            last_buy = cur.fetchone()
-            
-            if last_buy:
-                buy_price = float(last_buy[0])
-                prev_fee = float(last_buy[1])
-                sell_price = float(order.filled_avg_price) # Using actual filled price
-                
-                # P&L Math
-                realized_pnl = (sell_price - buy_price) * qty
-                fee_paid = prev_fee + float(order.filled_avg_price) * qty * 0.001 # Assuming 0.1% fee
-                
-                # Save the "Truth" to the DB
-                cur.execute("""
-                    INSERT INTO trades (bot_name, symbol, side, price, quantity, realized_pnl, fee_paid)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """, (bot_name, symbol, 'SELL', sell_price, qty, realized_pnl, fee_paid))
-                conn.commit()
-            
-            cur.close()
-            conn.close()
+        # Record in database (both BUY and SELL)
+        conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO trades (bot_name, symbol, side, price, quantity, timestamp)
+            VALUES (%s, %s, %s, %s, %s, NOW())
+        """, (bot_name, symbol, side.value, float(order.filled_avg_price or 0.0), qty))
+        conn.commit()
+        cur.close()
+        conn.close()
 
         return order
     except Exception as e:
@@ -292,21 +269,14 @@ async def run_trading_mode(bot_name):
 
     while True:
         try:
-            # =====================================================
             # STEP 1: Fetch real portfolio value once per cycle.
-            # If already at/over cap, sell the largest position
-            # and skip ALL buys this cycle so the sell can settle.
-            # =====================================================
-            buys_allowed = True
             total_value = get_total_portfolio_value()
-
             if total_value is None:
                 logger.warning("Could not fetch portfolio value — skipping entire cycle.")
                 await asyncio.sleep(30)
                 continue
 
-            # running_portfolio_value tracks spend within this cycle
-            # without needing extra API calls between symbols.
+            buys_allowed = True
             running_portfolio_value = total_value
 
             if total_value >= MAX_PORTFOLIO_VALUE:
@@ -317,9 +287,7 @@ async def run_trading_mode(bot_name):
                 sell_largest_position()
                 buys_allowed = False  # block ALL buys this cycle
 
-            # =====================================================
             # STEP 2: Evaluate each symbol for signals.
-            # =====================================================
             for symbol in SYMBOLS:
                 now = time.time()
 
@@ -349,21 +317,15 @@ async def run_trading_mode(bot_name):
                 except Exception:
                     has_position = False
 
-                # --------------------------------------------------
                 # SELL logic
-                # --------------------------------------------------
                 if has_position and signal < 0.61:
                     logger.info(f"🔻 SELL signal for {symbol} at {current_price:.2f} (signal={signal:.3f})")
                     if execute_trade(bot_name, symbol, OrderSide.SELL, qty_held):
                         cooldown_until[symbol] = now + 3600  # 1-hour cooldown
                     continue  # never buy on the same tick we just sold
 
-                # --------------------------------------------------
                 # BUY logic
-                # --------------------------------------------------
                 if not has_position and signal > 0.63:
-
-                    # Global buy lock for this cycle
                     if not buys_allowed:
                         logger.info(
                             f"🚫 BUY suppressed for {symbol} this cycle "
@@ -372,7 +334,7 @@ async def run_trading_mode(bot_name):
                         continue
 
                     qty = ORDER_AMOUNT / current_price
-                    trade_value = qty * current_price  # should equal ORDER_AMOUNT
+                    trade_value = qty * current_price
 
                     if trade_value > MAX_SINGLE_TRADE_USD:
                         logger.error(
@@ -381,9 +343,7 @@ async def run_trading_mode(bot_name):
                         )
                         continue
 
-                    # KEY FIX: check headroom BEFORE placing the order.
-                    # If there isn't enough room for a full ORDER_AMOUNT buy,
-                    # block this and all remaining buys this cycle.
+                    # Check headroom before placing the order
                     headroom = MAX_PORTFOLIO_VALUE - running_portfolio_value
                     if headroom < ORDER_AMOUNT:
                         logger.warning(
@@ -404,19 +364,7 @@ async def run_trading_mode(bot_name):
                                 f"(${MAX_PORTFOLIO_VALUE - running_portfolio_value:.2f} remaining). "
                                 f"No more buys this cycle."
                             )
-              if execute_trade(bot_name, symbol, OrderSide.BUY, qty):
-    # Log the BUY into your database
-    conn = psycopg2.connect(os.getenv("DATABASE_URL"))
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO trades (bot_name, symbol, side, price, quantity)
-        VALUES (%s, %s, %s, %s, %s)
-    """, (bot_name, symbol, 'BUY', current_price, qty))
-    conn.commit()
-    cur.close()
-    conn.close()
-    
-    # ... rest of your existing cooldown/logic ...              buys_allowed = False
+                            buys_allowed = False
 
                 await asyncio.sleep(2)  # small pause between symbol evaluations
 
