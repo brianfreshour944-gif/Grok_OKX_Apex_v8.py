@@ -132,7 +132,7 @@ class SafeMLPredictor:
 async def record_trade(bot_name, symbol, side, qty, order_id):
     """Wait for fill, then log to PostgreSQL."""
     try:
-        # Wait for fill using the correct Alpaca method
+        # Wait for fill
         for _ in range(20):
             order = trading_client.get_order_by_id(order_id)
             if order.filled_avg_price:
@@ -146,7 +146,14 @@ async def record_trade(bot_name, symbol, side, qty, order_id):
         cur.execute("""
             INSERT INTO trades (bot_name, symbol, side, price, quantity, order_id, timestamp)
             VALUES (%s, %s, %s, %s, %s, %s, NOW())
-        """, (bot_name, symbol, side, price, qty, order_id))
+        """, (
+            bot_name,
+            symbol,
+            side,
+            price,
+            qty,
+            str(order_id)   # <-- FIXED HERE
+        ))
         conn.commit()
         cur.close()
         conn.close()
@@ -155,6 +162,7 @@ async def record_trade(bot_name, symbol, side, qty, order_id):
 
     except Exception as e:
         logger.error(f"DB logging failed: {e}")
+
 
 
 
