@@ -12,7 +12,7 @@ import joblib
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
-from alpaca.trading.client import TradingClient
+from alpaca.trading.client import CryptoTradingClient
 from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.data.historical import CryptoHistoricalDataClient
@@ -39,7 +39,7 @@ API_KEY = os.getenv("APCA_API_KEY_ID")
 API_SECRET = os.getenv("APCA_API_SECRET_KEY")
 PAPER = os.getenv("APCA_API_PAPER", "true").lower() == "true"
 
-trading_client = TradingClient(api_key=API_KEY, secret_key=API_SECRET, paper=PAPER)
+crypto_client = CryptoTradingClient(api_key=API_KEY, secret_key=API_SECRET, paper=PAPER)
 data_client = CryptoHistoricalDataClient()
 
 cooldown_until = {symbol: 0.0 for symbol in SYMBOLS}
@@ -133,7 +133,7 @@ async def record_trade(bot_name, symbol, side, qty, order_id):
     try:
         # Wait for fill
         for _ in range(20):
-            order = trading_client.get_order(order_id)
+            order = crypto_client.get_order_by_id(order_id)
             if order.filled_avg_price:
                 break
             await asyncio.sleep(1)
@@ -154,6 +154,7 @@ async def record_trade(bot_name, symbol, side, qty, order_id):
 
     except Exception as e:
         logger.error(f"DB logging failed: {e}")
+
 
 # ========================= ORDER EXECUTION =========================
 async def place_order(bot_name, symbol, side, qty):
