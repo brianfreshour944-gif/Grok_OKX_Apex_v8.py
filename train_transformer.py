@@ -132,10 +132,9 @@ class SafeMLPredictor:
 async def record_trade(bot_name, symbol, side, qty, order_id):
     """Wait for fill, then log to PostgreSQL."""
     try:
-        # Wait for crypto order fill
+        # Wait for fill using the correct Alpaca method
         for _ in range(20):
-            order = trading_client.get_crypto_order_by_id(order_id)
-
+            order = trading_client.get_order_by_id(order_id)
             if order.filled_avg_price:
                 break
             await asyncio.sleep(1)
@@ -156,6 +155,7 @@ async def record_trade(bot_name, symbol, side, qty, order_id):
 
     except Exception as e:
         logger.error(f"DB logging failed: {e}")
+
 
 
 
