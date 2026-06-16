@@ -136,7 +136,7 @@ async def record_trade(bot_name, symbol, side, qty, order_id):
         for _ in range(20):
             order = trading_client.get_crypto_order_by_id(order_id)
 
-          if order.filled_avg_price:
+            if order.filled_avg_price:
                 break
             await asyncio.sleep(1)
 
