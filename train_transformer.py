@@ -39,8 +39,9 @@ API_KEY = os.getenv("APCA_API_KEY_ID")
 API_SECRET = os.getenv("APCA_API_SECRET_KEY")
 PAPER = os.getenv("APCA_API_PAPER", "true").lower() == "true"
 
-crypto_client = CryptoTradingClient(api_key=API_KEY, secret_key=API_SECRET, paper=PAPER)
+trading_client = TradingClient(api_key=API_KEY, secret_key=API_SECRET, paper=PAPER)
 data_client = CryptoHistoricalDataClient()
+
 
 cooldown_until = {symbol: 0.0 for symbol in SYMBOLS}
 pending_orders = {}  # <-- NEW: prevents double buys/sells
@@ -134,7 +135,8 @@ async def record_trade(bot_name, symbol, side, qty, order_id):
         # Wait for crypto order fill
         for _ in range(20):
             order = trading_client.get_crypto_order_by_id(order_id)
-            if order.filled_avg_price:
+
+          if order.filled_avg_price:
                 break
             await asyncio.sleep(1)
 
@@ -154,6 +156,7 @@ async def record_trade(bot_name, symbol, side, qty, order_id):
 
     except Exception as e:
         logger.error(f"DB logging failed: {e}")
+
 
 
 
