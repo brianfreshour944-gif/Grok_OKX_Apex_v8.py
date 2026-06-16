@@ -12,7 +12,7 @@ import joblib
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
-from alpaca.trading.client import CryptoTradingClient
+from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.data.historical import CryptoHistoricalDataClient
@@ -131,9 +131,9 @@ class SafeMLPredictor:
 async def record_trade(bot_name, symbol, side, qty, order_id):
     """Wait for fill, then log to PostgreSQL."""
     try:
-        # Wait for fill
+        # Wait for crypto order fill
         for _ in range(20):
-            order = crypto_client.get_order_by_id(order_id)
+            order = trading_client.get_crypto_order_by_id(order_id)
             if order.filled_avg_price:
                 break
             await asyncio.sleep(1)
@@ -154,6 +154,7 @@ async def record_trade(bot_name, symbol, side, qty, order_id):
 
     except Exception as e:
         logger.error(f"DB logging failed: {e}")
+
 
 
 # ========================= ORDER EXECUTION =========================
