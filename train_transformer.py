@@ -26,15 +26,13 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(
 logger = logging.getLogger(__name__)
 
 # ========================= CONFIG =========================
-BOT_NAME = os.getenv("BOT_NAME", "Grok_Alpaca_Apex_v8")
-SYMBOLS = ["BTC/USD", "ETH/USD", "SOL/USD"]
+BOT_NAME = os.getenv("BOT_NAME", "Grok_Alpaca_Apex_v9_CuttingEdge")
+SYMBOLS = ["BTC/USD", "ETH/USD", "SOL/USD", "DOGE/USD"]   # DOGE added
 
 ACCOUNT_BASE = float(os.getenv("ACCOUNT_BASE", 10000))
-BASE_RISK_PERCENT = 0.008
-MIN_CONFIDENCE = 58
-MAX_SINGLE_TRADE_USD = 150
-COOLDOWN_BUY = 600
-COOLDOWN_SELL = 1800
+BASE_RISK_PERCENT = 0.006
+MAX_SINGLE_TRADE_USD = 120
+MAX_DRAWDOWN_STOP = -10.0
 
 SEQUENCE_LEN = 32
 MODEL_PATH = "grok_gqa_v9_best.pth"
@@ -48,13 +46,13 @@ data_client = CryptoHistoricalDataClient()
 
 cooldown_until = {symbol: 0.0 for symbol in SYMBOLS}
 trade_history = []
+start_equity = None
 
-# ========================= POSTGRESQL =========================
+# ========================= SAFE POSTGRESQL =========================
 def record_trade(bot_name, symbol, side, qty, price, pnl_pct=None):
     try:
         conn = psycopg2.connect(os.getenv("DATABASE_URL"))
         cur = conn.cursor()
-        # Updated to avoid missing column error
         cur.execute("""
             INSERT INTO trades (bot_name, symbol, side, price, quantity, pnl_pct, timestamp)
             VALUES (%s, %s, %s, %s, %s, %s, NOW())
@@ -62,9 +60,9 @@ def record_trade(bot_name, symbol, side, qty, price, pnl_pct=None):
         conn.commit()
         cur.close()
         conn.close()
-        logger.info(f"📘 DB Log: {side} {symbol} | Qty: {qty}")
+        logger.info(f"📘 DB: {side} {symbol} | Qty: {qty:.6f}")
     except Exception as e:
-        logger.error(f"PostgreSQL error: {e}")
+        logger.error(f"DB Error: {e}")
 
 # ========================= MODEL =========================
 class SafeMLPredictor:
@@ -99,7 +97,7 @@ class SafeMLPredictor:
 
 predictor = SafeMLPredictor(MODEL_PATH, SEQUENCE_LEN)
 
-# ========================= FEATURES + REGIME =========================
+# ========================= FEATURES =========================
 def safe_add_features(df: pd.DataFrame) -> pd.DataFrame:
     required = ['open', 'high', 'low', 'close', 'volume']
     for col in required:
@@ -137,18 +135,26 @@ def compute_regime_and_trend(df: pd.DataFrame):
         atr_pct = (atr / price) * 100
         ema50 = df['close'].ewm(span=50).mean().iloc[-1]
         trend = "up" if price > ema50 else "down"
-        regime = "wild" if atr_pct > 4 else "normal" if atr_pct > 2 else "quiet"
+        regime = "wild" if atr_pct > 4.0 else "normal" if atr_pct > 2.0 else "quiet"
         return regime, trend, round(atr_pct, 2)
     except:
         return "normal", "neutral", 2.0
 
 # ========================= MAIN LOOP =========================
 async def run_trading_mode():
-    logger.info("🚀 Grok Apex Ironclad Bot v8 - Full Fixed Version Started")
+    global start_equity
+    logger.info("🚀 Grok Apex Ironclad Bot v9 - Cutting Edge with DOGE Started")
     while True:
         try:
             account = trading_client.get_account()
             equity = float(account.equity)
+            if start_equity is None:
+                start_equity = equity
+
+            drawdown = (equity - start_equity) / start_equity * 100
+            if drawdown < MAX_DRAWDOWN_STOP:
+                logger.error("🚨 MAX DRAWDOWN HIT - Stopping trading")
+                break
 
             for symbol in SYMBOLS:
                 now = time.time()
@@ -171,12 +177,12 @@ async def run_trading_mode():
                     has_position = False
                     qty_held = 0
 
-                if has_position and signal < 0.58:
-                    logger.info(f"🔻 SELL {symbol} @ {price:.2f}")
+                if has_position and signal < 0.55:
+                    logger.info(f"🔻 SELL {symbol} @ {price:.2f} | Regime: {regime}")
                     await place_order(symbol, OrderSide.SELL, qty_held)
-                    cooldown_until[symbol] = now + COOLDOWN_SELL
+                    cooldown_until[symbol] = now + 1800
 
-                elif not has_position and signal > (MIN_CONFIDENCE / 100.0):
+                elif not has_position and signal > 0.62:
                     risk_usd = equity * BASE_RISK_PERCENT
                     qty = risk_usd / price
                     if qty * price > MAX_SINGLE_TRADE_USD:
@@ -184,12 +190,13 @@ async def run_trading_mode():
 
                     logger.info(f"🟢 BUY {symbol} @ {price:.2f} | Regime: {regime} | Signal: {signal:.3f}")
                     await place_order(symbol, OrderSide.BUY, qty)
-                    cooldown_until[symbol] = now + COOLDOWN_BUY
+                    cooldown_until[symbol] = now + 900
 
-                await asyncio.sleep(1.5)
-            await asyncio.sleep(30)
+                await asyncio.sleep(2)
+
+            await asyncio.sleep(40)
         except Exception as e:
-            logger.error(f"Loop error: {e}")
+            logger.error(f"Critical loop error: {e}")
             await asyncio.sleep(30)
 
 async def place_order(symbol, side, qty):
@@ -202,7 +209,6 @@ async def place_order(symbol, side, qty):
                 time_in_force=TimeInForce.GTC
             )
         )
-        # Fixed: record_trade is sync, so no 'await'
         record_trade(BOT_NAME, symbol, side.value, qty, None)
         logger.info(f"✅ Order submitted: {side} {symbol} {qty}")
         return True
@@ -212,11 +218,7 @@ async def place_order(symbol, side, qty):
 
 async def get_clean_ohlcv_dataframe(symbol):
     try:
-        req = CryptoBarsRequest(
-            symbol_or_symbols=symbol,
-            timeframe=TimeFrame.Minute,
-            limit=600
-        )
+        req = CryptoBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Minute, limit=600)
         bars = data_client.get_crypto_bars(req).data.get(symbol, [])
         if len(bars) < SEQUENCE_LEN:
             return None
@@ -235,7 +237,7 @@ async def get_clean_ohlcv_dataframe(symbol):
         }).fillna(0)
         return df.tail(SEQUENCE_LEN)
     except Exception as e:
-        logger.error(f"Data error {symbol}: {e}")
+        logger.error(f"Data fetch error {symbol}: {e}")
         return None
 
 if __name__ == "__main__":
