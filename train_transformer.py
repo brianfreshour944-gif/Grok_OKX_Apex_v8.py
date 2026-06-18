@@ -197,19 +197,23 @@ async def place_order_safe(symbol, side, qty, price):
             return False
 
         # ============================
-        # DUST‑SAFE SELL FIX (IMPORTANT)
+        # DUST‑SAFE SELL FIX (WORKING)
         # ============================
         if side == OrderSide.SELL:
             try:
-                # Fetch actual position to avoid dust mismatch
-                pos = trading_client.get_open_position(symbol)
-                available_qty = float(pos.qty)
+                # Alpaca crypto positions must be fetched from get_all_positions()
+                positions = trading_client.get_all_positions()
+                alpaca_sym = symbol.replace("/", "")
 
-                # Never try to sell more than you actually hold
-                # Subtract a tiny epsilon to avoid precision mismatch
+                for p in positions:
+                    if p.symbol == alpaca_sym:
+                        available_qty = float(p.qty)
+                        break
+                else:
+                    available_qty = 0.0
+
+                # Clamp sell qty to avoid precision mismatch
                 max_safe_qty = round(available_qty - 1e-8, 6)
-
-                # Clamp the sell quantity
                 clean_qty = min(clean_qty, max_safe_qty)
 
                 if clean_qty <= 0:
@@ -218,7 +222,6 @@ async def place_order_safe(symbol, side, qty, price):
 
             except Exception as e:
                 logger.error(f"Dust‑safe SELL check failed ({symbol}): {e}")
-                # Fallback: reduce qty slightly
                 clean_qty = round(clean_qty * 0.9999, 6)
 
         # ============================
@@ -239,6 +242,7 @@ async def place_order_safe(symbol, side, qty, price):
     except Exception as e:
         logger.error(f"Order Execution Failed ({symbol} {side}): {e}")
         return False
+
 
 
 async def run_trading_mode():
