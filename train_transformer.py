@@ -189,25 +189,57 @@ async def get_clean_ohlcv(symbol):
         return None
 
 async def place_order_safe(symbol, side, qty, price):
-    """Handles rounding and submission."""
+    """Handles rounding, dust‑safe selling, and submission."""
     try:
-        # Crypto precision: Round to 4-6 decimals for quantity depending on asset
-        # Most Alpaca crypto pairs accept 6 decimals.
+        # Round quantity to Alpaca‑safe precision
         clean_qty = round(float(qty), 6)
-        if clean_qty <= 0: return False
+        if clean_qty <= 0:
+            return False
 
+        # ============================
+        # DUST‑SAFE SELL FIX (IMPORTANT)
+        # ============================
+        if side == OrderSide.SELL:
+            try:
+                # Fetch actual position to avoid dust mismatch
+                pos = trading_client.get_open_position(symbol)
+                available_qty = float(pos.qty)
+
+                # Never try to sell more than you actually hold
+                # Subtract a tiny epsilon to avoid precision mismatch
+                max_safe_qty = round(available_qty - 1e-8, 6)
+
+                # Clamp the sell quantity
+                clean_qty = min(clean_qty, max_safe_qty)
+
+                if clean_qty <= 0:
+                    logger.error(f"Sell skipped for {symbol}: dust-only position ({available_qty})")
+                    return False
+
+            except Exception as e:
+                logger.error(f"Dust‑safe SELL check failed ({symbol}): {e}")
+                # Fallback: reduce qty slightly
+                clean_qty = round(clean_qty * 0.9999, 6)
+
+        # ============================
+        # Submit order
+        # ============================
         order_data = MarketOrderRequest(
             symbol=symbol,
             qty=clean_qty,
             side=side,
             time_in_force=TimeInForce.GTC
         )
+
         order = trading_client.submit_order(order_data)
         record_trade(BOT_NAME, symbol, side.value, clean_qty, price, order_id=order.id)
+
         return True
+
     except Exception as e:
         logger.error(f"Order Execution Failed ({symbol} {side}): {e}")
         return False
+
 
 async def run_trading_mode():
     global start_equity
