@@ -188,37 +188,39 @@ async def get_clean_ohlcv(symbol):
         logger.error(f"Data Fetch Error {symbol}: {e}")
         return None
 
-async def place_order_safe(symbol, side, qty, price):
-    """Handles rounding, dust‑safe selling, and submission."""
+async def place_order_safe(self, symbol, side, qty, price):
+    """Handles rounding and uses close_position for exits."""
     try:
-        # Round quantity to Alpaca‑safe precision
-        clean_qty = round(float(qty), 6)
-        if clean_qty <= 0:
-            return False
+        # --- BUY SIDE (Keep existing logic) ---
+        if side == OrderSide.BUY:
+            clean_qty = round(float(qty), 6)
+            order_data = MarketOrderRequest(
+                symbol=symbol, qty=clean_qty, side=side, time_in_force=TimeInForce.GTC
+            )
+            order = trading_client.submit_order(order_data)
+            record_trade(BOT_NAME, symbol, side.value, clean_qty, price, order_id=order.id)
+            return True
 
-        # ============================
-        # DUST‑SAFE SELL FIX (WORKING)
-        # ============================
-        if side == OrderSide.SELL:
+        # --- SELL SIDE (FIXED: Use close_position) ---
+        elif side == OrderSide.SELL:
             try:
-                # Alpaca crypto positions must be fetched from get_all_positions()
-                positions = trading_client.get_all_positions()
+                # Instead of submitting a SELL order with a specific quantity,
+                # we tell Alpaca to close the entire position for this symbol.
+                # This ignores 'dust' precision errors.
                 alpaca_sym = symbol.replace("/", "")
+                trading_client.close_position(alpaca_sym)
+                
+                # Log the exit
+                record_trade(BOT_NAME, symbol, "SELL", qty, price, order_id="CLOSED_ALL")
+                logger.info(f"✅ Successfully closed all {symbol} positions.")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to close position via API: {e}")
+                return False
 
-                for p in positions:
-                    if p.symbol == alpaca_sym:
-                        available_qty = float(p.qty)
-                        break
-                else:
-                    available_qty = 0.0
-
-                # Clamp sell qty to avoid precision mismatch
-                max_safe_qty = round(available_qty - 1e-8, 6)
-                clean_qty = min(clean_qty, max_safe_qty)
-
-                if clean_qty <= 0:
-                    logger.error(f"Sell skipped for {symbol}: dust-only position ({available_qty})")
-                    return False
+    except Exception as e:
+        logger.error(f"Order Execution Failed ({symbol} {side}): {e}")
+        return False
 
             except Exception as e:
                 logger.error(f"Dust‑safe SELL check failed ({symbol}): {e}")
