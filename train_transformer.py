@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import time
+import math
 import psycopg2
 import pandas as pd
 import numpy as np
@@ -194,7 +195,10 @@ async def get_clean_ohlcv(symbol):
         return None
 
 async def place_order_safe(symbol, side, qty, price):
-    """Handles rounding, dust‑safe selling, and submission."""
+    """
+    Handles rounding, dust‑safe selling, and submission.
+    Uses floor‑truncation to 6 decimals to avoid overshooting available quantity.
+    """
     try:
         # Round quantity to Alpaca‑safe precision
         clean_qty = round(float(qty), 6)
@@ -202,11 +206,10 @@ async def place_order_safe(symbol, side, qty, price):
             return False
 
         # ============================
-        # DUST‑SAFE SELL FIX (WORKING)
+        # DUST‑SAFE SELL FIX (TRUNCATE)
         # ============================
         if side == OrderSide.SELL:
             try:
-                # Alpaca crypto positions must be fetched from get_all_positions()
                 positions = trading_client.get_all_positions()
                 alpaca_sym = symbol.replace("/", "")
 
@@ -216,8 +219,13 @@ async def place_order_safe(symbol, side, qty, price):
                         available_qty = float(p.qty)
                         break
 
-                # Clamp sell qty to avoid precision mismatch
-                max_safe_qty = round(available_qty - 1e-8, 6)
+                # Truncate available quantity to 6 decimal places (floor)
+                # This guarantees we never request more than we own.
+                max_safe_qty = math.floor(available_qty * 1_000_000) / 1_000_000.0
+
+                # Also subtract a tiny epsilon (1e-9) to be extra safe
+                max_safe_qty = max(0.0, max_safe_qty - 1e-9)
+
                 clean_qty = min(clean_qty, max_safe_qty)
 
                 if clean_qty <= 0:
@@ -226,6 +234,7 @@ async def place_order_safe(symbol, side, qty, price):
 
             except Exception as e:
                 logger.error(f"Dust‑safe SELL check failed ({symbol}): {e}")
+                # Fallback: reduce by 0.01% (but will still use original clean_qty)
                 clean_qty = round(clean_qty * 0.9999, 6)
 
         # ============================
