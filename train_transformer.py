@@ -12,6 +12,7 @@ import torch
 import joblib
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+from decimal import Decimal, ROUND_DOWN   # <-- NEW IMPORT
 
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
@@ -194,14 +195,19 @@ async def get_clean_ohlcv(symbol):
         logger.error(f"Data Fetch Error {symbol}: {e}")
         return None
 
+# ---------- NEW FLOOR FUNCTION AND UPDATED place_order_safe ----------
+def floor_to(value: float, decimals: int) -> float:
+    """Truncate (never round up) to N decimal places using Decimal to avoid float drift."""
+    q = Decimal(str(value)).quantize(Decimal('1e-{}'.format(decimals)), rounding=ROUND_DOWN)
+    return float(q)
+
 async def place_order_safe(symbol, side, qty, price):
     """
     Handles rounding, dust‑safe selling, and submission.
     Uses floor‑truncation to 6 decimals to avoid overshooting available quantity.
     """
     try:
-        # Round quantity to Alpaca‑safe precision
-        clean_qty = round(float(qty), 6)
+        clean_qty = float(qty)
         if clean_qty <= 0:
             return False
 
@@ -212,30 +218,34 @@ async def place_order_safe(symbol, side, qty, price):
             try:
                 positions = trading_client.get_all_positions()
                 alpaca_sym = symbol.replace("/", "")
-
                 available_qty = 0.0
                 for p in positions:
                     if p.symbol == alpaca_sym:
                         available_qty = float(p.qty)
                         break
 
-                # Truncate available quantity to 6 decimal places (floor)
-                # This guarantees we never request more than we own.
-                max_safe_qty = math.floor(available_qty * 1_000_000) / 1_000_000.0
-
-                # Also subtract a tiny epsilon (1e-9) to be extra safe
-                max_safe_qty = max(0.0, max_safe_qty - 1e-9)
-
+                # Truncate available quantity to 6 decimal places (floor) —
+                # guarantees we never request more than we own.
+                max_safe_qty = floor_to(available_qty, 6)
+                # Extra safety margin against float/API drift
+                max_safe_qty = max(0.0, max_safe_qty - 1e-7)
                 clean_qty = min(clean_qty, max_safe_qty)
 
                 if clean_qty <= 0:
                     logger.error(f"Sell skipped for {symbol}: dust-only position ({available_qty})")
                     return False
-
             except Exception as e:
-                logger.error(f"Dust‑safe SELL check failed ({symbol}): {e}")
-                # Fallback: reduce by 0.01% (but will still use original clean_qty)
-                clean_qty = round(clean_qty * 0.9999, 6)
+                logger.error(f"Dust‑safe SELL check failed ({symbol}): {e}", exc_info=True)
+                # No live position data available — apply a bigger defensive
+                # haircut and TRUNCATE (never round up) what we already have.
+                clean_qty = floor_to(clean_qty * 0.999, 6)
+                if clean_qty <= 0:
+                    return False
+        else:
+            # BUY side: plain truncation is fine, no position-vs-balance mismatch risk
+            clean_qty = floor_to(clean_qty, 6)
+            if clean_qty <= 0:
+                return False
 
         # ============================
         # Submit order
@@ -246,15 +256,15 @@ async def place_order_safe(symbol, side, qty, price):
             side=side,
             time_in_force=TimeInForce.GTC
         )
-
         order = trading_client.submit_order(order_data)
         record_trade(BOT_NAME, symbol, side.value, clean_qty, price, order_id=order.id)
-
         return True
 
     except Exception as e:
-        logger.error(f"Order Execution Failed ({symbol} {side}): {e}")
+        logger.error(f"Order Execution Failed ({symbol} {side}): {e}", exc_info=True)
         return False
+
+# ===================== MAIN TRADING LOOP =====================
 
 async def run_trading_mode():
     global start_equity
