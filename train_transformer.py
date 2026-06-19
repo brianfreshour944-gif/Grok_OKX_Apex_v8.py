@@ -188,7 +188,7 @@ async def get_clean_ohlcv(symbol):
         logger.error(f"Data Fetch Error {symbol}: {e}")
         return None
 
-async def place_order_safe(self, symbol, side, qty, price):
+async def place_order_safe(symbol, side, qty, price):
     """Handles rounding and uses close_position for exits."""
     try:
         # --- BUY SIDE ---
@@ -201,26 +201,17 @@ async def place_order_safe(self, symbol, side, qty, price):
             record_trade(BOT_NAME, symbol, side.value, clean_qty, price, order_id=order.id)
             return True
 
-        # --- SELL SIDE (FIXED: Uses close_position to avoid precision/dust errors) ---
+        # --- SELL SIDE ---
         elif side == OrderSide.SELL:
             try:
-                # Alpaca expects the symbol without the slash for position management
                 alpaca_sym = symbol.replace("/", "")
-                
-                # This closes the entire position for the symbol, ignoring dust issues
                 trading_client.close_position(alpaca_sym)
-                
-                # Log the exit
                 record_trade(BOT_NAME, symbol, "SELL", qty, price, order_id="CLOSED_ALL")
                 logger.info(f"✅ Successfully closed all {symbol} positions.")
                 return True
             except Exception as e:
                 logger.error(f"Failed to close position via API: {e}")
                 return False
-
-    except Exception as e:
-        logger.error(f"Order Execution Failed ({symbol} {side}): {e}")
-        return False
 
     except Exception as e:
         logger.error(f"Order Execution Failed ({symbol} {side}): {e}")
