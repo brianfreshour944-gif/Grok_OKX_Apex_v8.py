@@ -12,7 +12,7 @@ import torch
 import joblib
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from decimal import Decimal, ROUND_DOWN   # <-- NEW IMPORT
+from decimal import Decimal, ROUND_DOWN
 
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
@@ -44,10 +44,10 @@ MAX_DRAWDOWN_STOP     = -10.0
 MAX_PORTFOLIO_VALUE   = 190.0
 MAX_OPEN_POSITIONS    = 2
 MAX_HOLD_HOURS        = 4.0
-PROFIT_TARGET_PCT     = 0.025   # Slightly widened for volatility
+PROFIT_TARGET_PCT     = 0.025
 STOP_LOSS_PCT         = 0.03
 BUY_SIGNAL            = 0.62
-SELL_SIGNAL           = 0.52    # Slightly lowered to prevent "jitter" selling
+SELL_SIGNAL           = 0.52
 
 SEQUENCE_LEN = 32
 MODEL_PATH = "grok_gqa_v9_best.pth"
@@ -66,12 +66,10 @@ start_equity   = None
 # ========================= UTILS =========================
 
 def record_trade(bot_name, symbol, side, qty, price, pnl_pct=None, order_id=None):
-    """Logs trade to Postgres with fail-safety."""
     db_url = os.getenv("DATABASE_URL")
     if not db_url:
         logger.warning("No DATABASE_URL found. Skipping DB log.")
         return
-
     try:
         with psycopg2.connect(db_url) as conn:
             with conn.cursor() as cur:
@@ -86,13 +84,12 @@ def record_trade(bot_name, symbol, side, qty, price, pnl_pct=None, order_id=None
         logger.error(f"DB Insert Error: {e}")
 
 def normalize_symbol(symbol):
-    """Ensures symbol is in Alpaca-friendly format (e.g., BTC/USD)."""
     return symbol.replace("-", "/")
 
 def get_buying_power():
     try:
         acc = trading_client.get_account()
-        return float(acc.non_marginable_buying_power)  # Safer for Crypto
+        return float(acc.non_marginable_buying_power)
     except Exception as e:
         logger.error(f"Error fetching buying power: {e}")
         return 0.0
@@ -101,30 +98,25 @@ def get_buying_power():
 
 def safe_add_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    # Basic technicals
     df['returns'] = df['close'].pct_change().fillna(0)
     df['vol_14']  = df['returns'].rolling(14).std().fillna(0)
 
-    # RSI
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss.replace(0, np.nan)
     df['rsi'] = (100 - (100 / (1 + rs))).fillna(50.0)
 
-    # MACD
     ema12 = df['close'].ewm(span=12, adjust=False).mean()
     ema26 = df['close'].ewm(span=26, adjust=False).mean()
     df['macd'] = ema12 - ema26
 
-    # ATR
     high_low = df['high'] - df['low']
     high_close = (df['high'] - df['close'].shift()).abs()
     low_close = (df['low'] - df['close'].shift()).abs()
     ranges = pd.concat([high_low, high_close, low_close], axis=1)
     df['atr'] = ranges.max(axis=1).rolling(14).mean().fillna(0)
 
-    # Ensure all columns in FEATURE_COLS exist and are clean
     for col in FEATURE_COLS:
         if col not in df.columns:
             df[col] = 0.0
@@ -161,14 +153,12 @@ class SafeMLPredictor:
             data = feat_df.tail(self.seq_len).values.astype(np.float32)
             if len(data) < self.seq_len:
                 return 0.5
-
             data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
             if self.scaler:
                 data = self.scaler.transform(data)
-
             x = torch.tensor(data).unsqueeze(0).to(self.device)
             with torch.no_grad():
-                return float(torch.sigmoid(self.model(x)).item())  # Ensure 0-1 range
+                return float(torch.sigmoid(self.model(x)).item())
         except Exception as e:
             logger.error(f"Prediction error: {e}")
             return 0.5
@@ -183,11 +173,9 @@ async def get_clean_ohlcv(symbol):
         bars = data_client.get_crypto_bars(req).data.get(symbol, [])
         if not bars:
             return None
-
         df = pd.DataFrame([{"timestamp": b.timestamp, "open": b.open, "high": b.high,
                             "low": b.low, "close": b.close, "volume": b.volume} for b in bars])
         df.set_index("timestamp", inplace=True)
-        # Resample to 5m to match training
         df = df.resample("5min").agg({"open": "first", "high": "max", "low": "min",
                                       "close": "last", "volume": "sum"}).dropna()
         return df
@@ -195,25 +183,17 @@ async def get_clean_ohlcv(symbol):
         logger.error(f"Data Fetch Error {symbol}: {e}")
         return None
 
-# ---------- NEW FLOOR FUNCTION AND UPDATED place_order_safe ----------
+# ---------- FLOOR FUNCTION AND UPDATED place_order_safe ----------
 def floor_to(value: float, decimals: int) -> float:
-    """Truncate (never round up) to N decimal places using Decimal to avoid float drift."""
     q = Decimal(str(value)).quantize(Decimal('1e-{}'.format(decimals)), rounding=ROUND_DOWN)
     return float(q)
 
 async def place_order_safe(symbol, side, qty, price):
-    """
-    Handles rounding, dust‑safe selling, and submission.
-    Uses floor‑truncation to 6 decimals to avoid overshooting available quantity.
-    """
     try:
         clean_qty = float(qty)
         if clean_qty <= 0:
             return False
 
-        # ============================
-        # DUST‑SAFE SELL FIX (TRUNCATE)
-        # ============================
         if side == OrderSide.SELL:
             try:
                 positions = trading_client.get_all_positions()
@@ -223,33 +203,22 @@ async def place_order_safe(symbol, side, qty, price):
                     if p.symbol == alpaca_sym:
                         available_qty = float(p.qty)
                         break
-
-                # Truncate available quantity to 6 decimal places (floor) —
-                # guarantees we never request more than we own.
                 max_safe_qty = floor_to(available_qty, 6)
-                # Extra safety margin against float/API drift
                 max_safe_qty = max(0.0, max_safe_qty - 1e-7)
                 clean_qty = min(clean_qty, max_safe_qty)
-
                 if clean_qty <= 0:
                     logger.error(f"Sell skipped for {symbol}: dust-only position ({available_qty})")
                     return False
             except Exception as e:
                 logger.error(f"Dust‑safe SELL check failed ({symbol}): {e}", exc_info=True)
-                # No live position data available — apply a bigger defensive
-                # haircut and TRUNCATE (never round up) what we already have.
                 clean_qty = floor_to(clean_qty * 0.999, 6)
                 if clean_qty <= 0:
                     return False
         else:
-            # BUY side: plain truncation is fine, no position-vs-balance mismatch risk
             clean_qty = floor_to(clean_qty, 6)
             if clean_qty <= 0:
                 return False
 
-        # ============================
-        # Submit order
-        # ============================
         order_data = MarketOrderRequest(
             symbol=symbol,
             qty=clean_qty,
@@ -259,7 +228,6 @@ async def place_order_safe(symbol, side, qty, price):
         order = trading_client.submit_order(order_data)
         record_trade(BOT_NAME, symbol, side.value, clean_qty, price, order_id=order.id)
         return True
-
     except Exception as e:
         logger.error(f"Order Execution Failed ({symbol} {side}): {e}", exc_info=True)
         return False
@@ -270,7 +238,6 @@ async def run_trading_mode():
     global start_equity
     logger.info("🔥 Starting Grok Apex Ironclad...")
 
-    # Initial Equity Sync
     try:
         acc = trading_client.get_account()
         start_equity = float(acc.equity)
@@ -279,7 +246,6 @@ async def run_trading_mode():
 
     while True:
         try:
-            # 1. Heartbeat / Account Status
             account = trading_client.get_account()
             equity = float(account.equity)
             drawdown = (equity - start_equity) / start_equity * 100
@@ -295,7 +261,31 @@ async def run_trading_mode():
 
             logger.info(f"Heartbeat | Equity: ${equity:.2f} | Pos: {open_count} | Value: ${total_val:.2f}")
 
-            # 2. Iterate Symbols
+            # ===========================================================
+            # DUST CLEANUP – close positions below $1.00 market value
+            # ===========================================================
+            DUST_VALUE_THRESHOLD = 1.00   # adjust as needed
+
+            for symbol in SYMBOLS:
+                alpaca_sym = symbol.replace("/", "")
+                if alpaca_sym in positions:
+                    pos = positions[alpaca_sym]
+                    market_value = float(pos.market_value)
+                    if market_value < DUST_VALUE_THRESHOLD:
+                        try:
+                            trading_client.close_position(alpaca_sym)
+                            logger.info(f"🧹 Closed dust position: {alpaca_sym} (${market_value:.4f})")
+                            # Remove from dict so main logic won't see it
+                            del positions[alpaca_sym]
+                            # Update total_val and open_count (recalc after loop)
+                        except Exception as e:
+                            logger.warning(f"Could not close dust position {alpaca_sym}: {e}")
+            # Recalculate open_count and total_val after dust removal
+            open_count = len(positions)
+            total_val = sum(float(p.market_value) for p in positions.values())
+            # ===========================================================
+
+            # 2. Iterate Symbols (main trading logic)
             for symbol in SYMBOLS:
                 alpaca_sym = symbol.replace("/", "")
                 df = await get_clean_ohlcv(symbol)
@@ -305,20 +295,17 @@ async def run_trading_mode():
                 price = df['close'].iloc[-1]
                 signal = predictor.predict(df)
 
-                # Logic check: Position exists?
                 if alpaca_sym in positions:
                     pos = positions[alpaca_sym]
                     qty = float(pos.qty)
                     avg_entry = float(pos.avg_entry_price)
                     pnl = (price - avg_entry) / avg_entry
 
-                    # Fetch or estimate entry time
                     if symbol not in entry_time:
-                        entry_time[symbol] = time.time()  # Default for legacy positions
+                        entry_time[symbol] = time.time()
 
                     held_hrs = (time.time() - entry_time[symbol]) / 3600
 
-                    # EXIT LOGIC
                     exit_triggered = False
                     reason = ""
                     if pnl >= PROFIT_TARGET_PCT:
@@ -340,7 +327,6 @@ async def run_trading_mode():
                             entry_time.pop(symbol, None)
                             cooldown_until[symbol] = time.time() + 1800
 
-                # ENTRY LOGIC
                 else:
                     if time.time() < cooldown_until.get(symbol, 0):
                         continue
@@ -356,9 +342,9 @@ async def run_trading_mode():
                                     open_count += 1
                                     total_val += risk_amt
 
-                await asyncio.sleep(1)  # Interval between assets
+                await asyncio.sleep(1)
 
-            await asyncio.sleep(60)  # Interval between cycles
+            await asyncio.sleep(60)
 
         except Exception as e:
             logger.error(f"Main Loop Error: {e}")
