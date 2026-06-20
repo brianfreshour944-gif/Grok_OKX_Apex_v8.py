@@ -10,6 +10,7 @@ import pandas as pd
 import numpy as np
 import torch
 import joblib
+from utils import log_trade, push_heartbeat
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from decimal import Decimal, ROUND_DOWN
@@ -189,26 +190,19 @@ def floor_to(value: float, decimals: int) -> float:
     return float(q)
 
 async def place_order_safe(symbol, side, qty, price):
-    try:
-        clean_qty = float(qty)
-        if clean_qty <= 0:
-            return False
-
-        if side == OrderSide.SELL:
-            try:
-                positions = trading_client.get_all_positions()
-                alpaca_sym = symbol.replace("/", "")
-                available_qty = 0.0
-                for p in positions:
-                    if p.symbol == alpaca_sym:
-                        available_qty = float(p.qty)
-                        break
-                max_safe_qty = floor_to(available_qty, 6)
-                max_safe_qty = max(0.0, max_safe_qty - 1e-7)
-                clean_qty = min(clean_qty, max_safe_qty)
-                if clean_qty <= 0:
-                    logger.error(f"Sell skipped for {symbol}: dust-only position ({available_qty})")
-                    return False
+    # ... (existing logic for clean_qty) ...
+    
+    order = trading_client.submit_order(order_data)
+    
+    # --- REPLACE YOUR OLD record_trade CALL WITH THIS ---
+    log_trade(
+        bot_name=BOT_NAME,
+        symbol=symbol,
+        side=side.value,
+        qty=float(qty),
+        entry_price=float(price)
+    )
+    return True
             except Exception as e:
                 logger.error(f"Dust‑safe SELL check failed ({symbol}): {e}", exc_info=True)
                 clean_qty = floor_to(clean_qty * 0.999, 6)
@@ -260,6 +254,19 @@ async def run_trading_mode():
             buying_power = get_buying_power()
 
             logger.info(f"Heartbeat | Equity: ${equity:.2f} | Pos: {open_count} | Value: ${total_val:.2f}")
+            # Inside run_trading_mode -> while True:
+logger.info(f"Heartbeat | Equity: ${equity:.2f} | Pos: {open_count} | Value: ${total_val:.2f}")
+
+# --- ADD THIS HEARTBEAT CALL ---
+push_heartbeat(
+    bot_name=BOT_NAME,
+    equity=equity,
+    buying_power=buying_power,
+    daily_pnl=drawdown, # or your specific daily P&L calculation
+    total_pnl=0.0,      # replace with your total P&L tracker
+    open_positions=open_count,
+    trades_today=0      # replace with a daily trade counter if you have one
+)
 
             # ===========================================================
             # DUST CLEANUP – close positions below $1.00 market value
