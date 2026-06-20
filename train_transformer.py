@@ -67,6 +67,7 @@ start_equity   = None
 # ========================= UTILS =========================
 
 def record_trade(bot_name, symbol, side, qty, price, pnl_pct=None, order_id=None):
+    """Write trade to PostgreSQL (for Streamlit dashboard)."""
     db_url = os.getenv("DATABASE_URL")
     if not db_url:
         logger.warning("No DATABASE_URL found. Skipping DB log.")
@@ -184,25 +185,37 @@ async def get_clean_ohlcv(symbol):
         logger.error(f"Data Fetch Error {symbol}: {e}")
         return None
 
-# ---------- FLOOR FUNCTION AND UPDATED place_order_safe ----------
+# ---------- FLOOR FUNCTION ----------
 def floor_to(value: float, decimals: int) -> float:
     q = Decimal(str(value)).quantize(Decimal('1e-{}'.format(decimals)), rounding=ROUND_DOWN)
     return float(q)
 
-async def place_order_safe(symbol, side, qty, price):
-    # ... (existing logic for clean_qty) ...
-    
-    order = trading_client.submit_order(order_data)
-    
-    # --- REPLACE YOUR OLD record_trade CALL WITH THIS ---
-    log_trade(
-        bot_name=BOT_NAME,
-        symbol=symbol,
-        side=side.value,
-        qty=float(qty),
-        entry_price=float(price)
-    )
-    return True
+# ---------- CORRECTED place_order_safe ----------
+async def place_order_safe(symbol, side, qty, price_estimate):
+    """
+    Submit a market order and log the actual execution price.
+    """
+    try:
+        clean_qty = float(qty)
+        if clean_qty <= 0:
+            return False
+
+        # --- Dust handling for SELL orders ---
+        if side == OrderSide.SELL:
+            try:
+                positions = trading_client.get_all_positions()
+                alpaca_sym = symbol.replace("/", "")
+                available_qty = 0.0
+                for p in positions:
+                    if p.symbol == alpaca_sym:
+                        available_qty = float(p.qty)
+                        break
+                max_safe_qty = floor_to(available_qty, 6)
+                max_safe_qty = max(0.0, max_safe_qty - 1e-7)
+                clean_qty = min(clean_qty, max_safe_qty)
+                if clean_qty <= 0:
+                    logger.error(f"Sell skipped for {symbol}: dust-only position ({available_qty})")
+                    return False
             except Exception as e:
                 logger.error(f"Dust‑safe SELL check failed ({symbol}): {e}", exc_info=True)
                 clean_qty = floor_to(clean_qty * 0.999, 6)
@@ -213,6 +226,7 @@ async def place_order_safe(symbol, side, qty, price):
             if clean_qty <= 0:
                 return False
 
+        # --- Submit market order ---
         order_data = MarketOrderRequest(
             symbol=symbol,
             qty=clean_qty,
@@ -220,8 +234,41 @@ async def place_order_safe(symbol, side, qty, price):
             time_in_force=TimeInForce.GTC
         )
         order = trading_client.submit_order(order_data)
-        record_trade(BOT_NAME, symbol, side.value, clean_qty, price, order_id=order.id)
+
+        # --- Poll for fill price (up to 10 seconds) ---
+        filled_price = None
+        for _ in range(10):
+            order_status = trading_client.get_order_by_id(order.id)
+            if order_status.status == 'filled':
+                filled_price = float(order_status.filled_avg_price)
+                break
+            await asyncio.sleep(1)
+
+        if filled_price is None:
+            logger.warning(f"Order {order.id} not filled; using estimate {price_estimate}")
+            filled_price = price_estimate or 0.0
+
+        # --- Log to PostgreSQL (local DB) ---
+        record_trade(
+            bot_name=BOT_NAME,
+            symbol=symbol,
+            side=side.value,
+            qty=clean_qty,
+            price=filled_price,
+            order_id=order.id
+        )
+
+        # --- (Optional) Log to Base44 via log_trade() ---
+        log_trade(
+            bot_name=BOT_NAME,
+            symbol=symbol,
+            side=side.value,
+            qty=clean_qty,
+            entry_price=filled_price
+        )
+
         return True
+
     except Exception as e:
         logger.error(f"Order Execution Failed ({symbol} {side}): {e}", exc_info=True)
         return False
@@ -254,24 +301,22 @@ async def run_trading_mode():
             buying_power = get_buying_power()
 
             logger.info(f"Heartbeat | Equity: ${equity:.2f} | Pos: {open_count} | Value: ${total_val:.2f}")
-            # Inside run_trading_mode -> while True:
-logger.info(f"Heartbeat | Equity: ${equity:.2f} | Pos: {open_count} | Value: ${total_val:.2f}")
 
-# --- ADD THIS HEARTBEAT CALL ---
-push_heartbeat(
-    bot_name=BOT_NAME,
-    equity=equity,
-    buying_power=buying_power,
-    daily_pnl=drawdown, # or your specific daily P&L calculation
-    total_pnl=0.0,      # replace with your total P&L tracker
-    open_positions=open_count,
-    trades_today=0      # replace with a daily trade counter if you have one
-)
+            # --- Heartbeat to Base44 (if you use it) ---
+            push_heartbeat(
+                bot_name=BOT_NAME,
+                equity=equity,
+                buying_power=buying_power,
+                daily_pnl=drawdown,           # adjust as needed
+                total_pnl=0.0,                # track separately if you have a cumulative P&L
+                open_positions=open_count,
+                trades_today=0                # increment a counter when trades occur
+            )
 
             # ===========================================================
             # DUST CLEANUP – close positions below $1.00 market value
             # ===========================================================
-            DUST_VALUE_THRESHOLD = 1.00   # adjust as needed
+            DUST_VALUE_THRESHOLD = 1.00
 
             for symbol in SYMBOLS:
                 alpaca_sym = symbol.replace("/", "")
@@ -282,17 +327,17 @@ push_heartbeat(
                         try:
                             trading_client.close_position(alpaca_sym)
                             logger.info(f"🧹 Closed dust position: {alpaca_sym} (${market_value:.4f})")
-                            # Remove from dict so main logic won't see it
                             del positions[alpaca_sym]
-                            # Update total_val and open_count (recalc after loop)
                         except Exception as e:
                             logger.warning(f"Could not close dust position {alpaca_sym}: {e}")
+
             # Recalculate open_count and total_val after dust removal
             open_count = len(positions)
             total_val = sum(float(p.market_value) for p in positions.values())
-            # ===========================================================
 
+            # ===========================================================
             # 2. Iterate Symbols (main trading logic)
+            # ===========================================================
             for symbol in SYMBOLS:
                 alpaca_sym = symbol.replace("/", "")
                 df = await get_clean_ohlcv(symbol)
