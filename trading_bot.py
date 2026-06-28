@@ -89,6 +89,36 @@ def record_trade(bot_name, symbol, side, qty, price, pnl_pct=None, order_id=None
         logger.error(f"DB Error: {e}")
 
 
+def report_equity(bot_name, current_equity):
+    """
+    Reports this bot's real account equity to the dashboard.
+    starting_equity is set the first time a bot reports in and is never
+    overwritten afterward. live_equity and live_equity_updated_at are
+    overwritten on every call. Mirrors record_trade()'s connection style
+    so this file doesn't need a separate database module.
+    """
+    try:
+        conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+        cur = conn.cursor()
+        cur.execute("ALTER TABLE bot_status ADD COLUMN IF NOT EXISTS starting_equity NUMERIC")
+        cur.execute("ALTER TABLE bot_status ADD COLUMN IF NOT EXISTS live_equity NUMERIC")
+        cur.execute("ALTER TABLE bot_status ADD COLUMN IF NOT EXISTS live_equity_updated_at TIMESTAMP")
+        cur.execute("""
+            INSERT INTO bot_status (bot_name, starting_equity, live_equity, live_equity_updated_at, last_update)
+            VALUES (%s, %s, %s, NOW(), NOW())
+            ON CONFLICT (bot_name) DO UPDATE
+            SET live_equity = EXCLUDED.live_equity,
+                live_equity_updated_at = NOW(),
+                last_update = NOW(),
+                starting_equity = COALESCE(bot_status.starting_equity, EXCLUDED.starting_equity)
+        """, (bot_name, float(current_equity), float(current_equity)))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logger.error(f"report_equity DB Error: {e}")
+
+
 # ========================= FEATURES =========================
 def safe_add_features(df: pd.DataFrame) -> pd.DataFrame:
     required = ['open', 'high', 'low', 'close', 'volume']
@@ -300,6 +330,11 @@ async def run_trading_mode():
             equity  = float(account.equity)
             if start_equity is None:
                 start_equity = equity
+
+            try:
+                report_equity(BOT_NAME, equity)
+            except Exception as e:
+                logger.warning(f"⚠️ Could not report equity to dashboard: {e}")
 
             drawdown = (equity - start_equity) / start_equity * 100
             if drawdown < MAX_DRAWDOWN_STOP:
