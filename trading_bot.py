@@ -40,6 +40,7 @@ MAX_OPEN_POSITIONS    = 2       # Don't hold more than this many symbols at once
 MAX_HOLD_HOURS        = 4.0     # Force-sell after this long regardless of signal
 PROFIT_TARGET_PCT     = 0.02    # Sell if up 2%
 STOP_LOSS_PCT         = 0.03    # Sell if down 3%
+DUST_THRESHOLD_USD    = 1.50    # Ignore (don't sell) positions worth less than this
 BUY_SIGNAL            = 0.62
 SELL_SIGNAL           = 0.55
 
@@ -89,6 +90,8 @@ def record_trade(bot_name, symbol, side, qty, price, pnl_pct=None, order_id=None
         logger.error(f"DB Error: {e}")
 
 
+_equity_schema_ready = False
+
 def report_equity(bot_name, current_equity):
     """
     Reports this bot's real account equity to the dashboard.
@@ -96,13 +99,22 @@ def report_equity(bot_name, current_equity):
     overwritten afterward. live_equity and live_equity_updated_at are
     overwritten on every call. Mirrors record_trade()'s connection style
     so this file doesn't need a separate database module.
+
+    FIX: the ALTER TABLE migration now runs once per process (guarded by
+    _equity_schema_ready) instead of on every call -- this function gets
+    called every ~40s from the main loop, and repeating schema-altering
+    DDL that often is needless overhead and can briefly lock the table
+    for other bots that share it.
     """
+    global _equity_schema_ready
     try:
         conn = psycopg2.connect(os.getenv("DATABASE_URL"))
         cur = conn.cursor()
-        cur.execute("ALTER TABLE bot_status ADD COLUMN IF NOT EXISTS starting_equity NUMERIC")
-        cur.execute("ALTER TABLE bot_status ADD COLUMN IF NOT EXISTS live_equity NUMERIC")
-        cur.execute("ALTER TABLE bot_status ADD COLUMN IF NOT EXISTS live_equity_updated_at TIMESTAMP")
+        if not _equity_schema_ready:
+            cur.execute("ALTER TABLE bot_status ADD COLUMN IF NOT EXISTS starting_equity NUMERIC")
+            cur.execute("ALTER TABLE bot_status ADD COLUMN IF NOT EXISTS live_equity NUMERIC")
+            cur.execute("ALTER TABLE bot_status ADD COLUMN IF NOT EXISTS live_equity_updated_at TIMESTAMP")
+            _equity_schema_ready = True
         cur.execute("""
             INSERT INTO bot_status (bot_name, starting_equity, live_equity, live_equity_updated_at, last_update)
             VALUES (%s, %s, %s, NOW(), NOW())
@@ -391,6 +403,20 @@ async def run_trading_mode():
                 has_position = pos_data is not None and pos_data['qty'] > 0
                 qty_held     = pos_data['qty']       if has_position else 0.0
                 avg_entry    = pos_data['avg_entry']  if has_position else 0.0
+
+                # Dust guard: Alpaca's automatic 2% price collar on crypto
+                # market orders can leave tiny leftover fragments after a
+                # partial fill (e.g. 0.00000063 BTC). Selling these repeatedly
+                # each cycle wastes a trade (and its fee) on a position worth
+                # a fraction of a cent, and the remainder only gets smaller
+                # each time rather than ever fully clearing. Treat anything
+                # under DUST_THRESHOLD_USD as not worth acting on.
+                position_notional = qty_held * price if has_position else 0.0
+                if has_position and position_notional < DUST_THRESHOLD_USD:
+                    logger.info(
+                        f"🧹 Ignoring dust position {symbol}: {qty_held:.9f} "
+                        f"(~${position_notional:.4f}) -- below ${DUST_THRESHOLD_USD} threshold")
+                    has_position = False  # treat as if flat for entry/exit logic below
 
                 # ---------------- EXIT LOGIC ----------------
                 if has_position:
