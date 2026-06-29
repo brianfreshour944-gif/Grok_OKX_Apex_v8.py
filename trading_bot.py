@@ -60,6 +60,9 @@ start_equity   = None
 # --- Track sell retry attempts to prevent spam ---
 sell_retry_cooldown = {}
 
+# --- Ensure bot_status schema migration runs only once per process ---
+_bot_status_schema_ready = False
+
 
 # ========================= SAFE POSTGRESQL =========================
 def record_trade(bot_name, symbol, side, qty, price, pnl_pct=None, order_id=None):
@@ -97,12 +100,18 @@ def report_equity(bot_name, current_equity):
     overwritten on every call. Mirrors record_trade()'s connection style
     so this file doesn't need a separate database module.
     """
+    global _bot_status_schema_ready
     try:
         conn = psycopg2.connect(os.getenv("DATABASE_URL"))
         cur = conn.cursor()
-        cur.execute("ALTER TABLE bot_status ADD COLUMN IF NOT EXISTS starting_equity NUMERIC")
-        cur.execute("ALTER TABLE bot_status ADD COLUMN IF NOT EXISTS live_equity NUMERIC")
-        cur.execute("ALTER TABLE bot_status ADD COLUMN IF NOT EXISTS live_equity_updated_at TIMESTAMP")
+        # Run schema-altering DDL only once per process, not on every call.
+        # Repeating ALTER TABLE every loop (~40s) is needless overhead and can
+        # briefly lock the table under concurrent load from multiple bots.
+        if not _bot_status_schema_ready:
+            cur.execute("ALTER TABLE bot_status ADD COLUMN IF NOT EXISTS starting_equity NUMERIC")
+            cur.execute("ALTER TABLE bot_status ADD COLUMN IF NOT EXISTS live_equity NUMERIC")
+            cur.execute("ALTER TABLE bot_status ADD COLUMN IF NOT EXISTS live_equity_updated_at TIMESTAMP")
+            _bot_status_schema_ready = True
         cur.execute("""
             INSERT INTO bot_status (bot_name, starting_equity, live_equity, live_equity_updated_at, last_update)
             VALUES (%s, %s, %s, NOW(), NOW())

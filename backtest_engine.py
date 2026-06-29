@@ -6,7 +6,7 @@ from datetime import datetime
 import logging
 from IPython.display import clear_output
 
-from ml_predictor import MLPredictor, GrokGQA_Transformer 
+from ml_predictor import SafeMLPredictor, GrokGQA_Transformer 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
 logger = logging.getLogger(__name__)
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 class BacktestEngine:
     def __init__(
         self,
-        predictor: MLPredictor,
+        predictor: SafeMLPredictor,
         historical_df: pd.DataFrame,
         initial_capital: float = 10000.0,
         transaction_cost: float = 0.001, 

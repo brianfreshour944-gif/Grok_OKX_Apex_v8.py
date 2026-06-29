@@ -159,7 +159,8 @@ class SafeMLPredictor:
                 data = self.scaler.transform(data)
             x = torch.tensor(data).unsqueeze(0).to(self.device)
             with torch.no_grad():
-                return float(torch.sigmoid(self.model(x)).item())
+                # Model.forward already applies sigmoid; do not re-apply it here.
+                return float(self.model(x).item())
         except Exception as e:
             logger.error(f"Prediction error: {e}")
             return 0.5
