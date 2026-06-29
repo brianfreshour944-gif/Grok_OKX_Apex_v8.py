@@ -9,7 +9,7 @@ import pandas as pd
 import numpy as np
 import torch
 import joblib
-from utils import log_trade, push_heartbeat
+from utils import log_trade
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from decimal import Decimal, ROUND_DOWN
@@ -83,6 +83,47 @@ def record_trade(bot_name, symbol, side, qty, price, pnl_pct=None, order_id=None
                 conn.commit()
     except Exception as e:
         logger.error(f"DB Insert Error: {e}")
+
+_equity_schema_ready = False
+
+def report_equity(bot_name, current_equity):
+    """
+    Reports this bot's real account equity to the dashboard's bot_status
+    table. starting_equity is set the first time a bot reports in and is
+    never overwritten afterward; live_equity is overwritten every call.
+
+    FIX: this is the actual deployed entrypoint (per the Dockerfile's
+    CMD ["python", "train_transformer.py"]) -- equity reporting was
+    previously only added to trading_bot.py, which the Dockerfile never
+    runs, so nothing ever reached the dashboard despite push_heartbeat()
+    appearing to "work" (it only ever printed locally, since
+    DASHBOARD_API_KEY for the old Base44 integration was never set).
+    """
+    global _equity_schema_ready
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url:
+        logger.warning("No DATABASE_URL found. Skipping equity report.")
+        return
+    try:
+        with psycopg2.connect(db_url) as conn:
+            with conn.cursor() as cur:
+                if not _equity_schema_ready:
+                    cur.execute("ALTER TABLE bot_status ADD COLUMN IF NOT EXISTS starting_equity NUMERIC")
+                    cur.execute("ALTER TABLE bot_status ADD COLUMN IF NOT EXISTS live_equity NUMERIC")
+                    cur.execute("ALTER TABLE bot_status ADD COLUMN IF NOT EXISTS live_equity_updated_at TIMESTAMP")
+                    _equity_schema_ready = True
+                cur.execute("""
+                    INSERT INTO bot_status (bot_name, starting_equity, live_equity, live_equity_updated_at, last_update)
+                    VALUES (%s, %s, %s, NOW(), NOW())
+                    ON CONFLICT (bot_name) DO UPDATE
+                    SET live_equity = EXCLUDED.live_equity,
+                        live_equity_updated_at = NOW(),
+                        last_update = NOW(),
+                        starting_equity = COALESCE(bot_status.starting_equity, EXCLUDED.starting_equity)
+                """, (bot_name, float(current_equity), float(current_equity)))
+                conn.commit()
+    except Exception as e:
+        logger.error(f"report_equity DB Error: {e}")
 
 def normalize_symbol(symbol):
     return symbol.replace("-", "/")
@@ -301,16 +342,16 @@ async def run_trading_mode():
 
             logger.info(f"Heartbeat | Equity: ${equity:.2f} | Pos: {open_count} | Value: ${total_val:.2f}")
 
-            # --- Heartbeat to Base44 (if you use it) ---
-            push_heartbeat(
-                bot_name=BOT_NAME,
-                equity=equity,
-                buying_power=buying_power,
-                daily_pnl=drawdown,           # adjust as needed
-                total_pnl=0.0,                # track separately if you have a cumulative P&L
-                open_positions=open_count,
-                trades_today=0                # increment a counter when trades occur
-            )
+            # Report real equity to the dashboard's Equity Tracking tab.
+            # FIX: previously called push_heartbeat() here, which only
+            # prints locally (the Base44 integration it targets was never
+            # configured) and never reached Postgres -- the dashboard
+            # showed "Not reported yet" indefinitely despite this bot
+            # trading successfully.
+            try:
+                report_equity(BOT_NAME, equity)
+            except Exception as e:
+                logger.warning(f"⚠️ Could not report equity to dashboard: {e}")
 
             # ===========================================================
             # DUST CLEANUP – close positions below $1.00 market value
