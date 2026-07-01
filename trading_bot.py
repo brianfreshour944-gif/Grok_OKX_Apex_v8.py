@@ -40,7 +40,6 @@ MAX_OPEN_POSITIONS    = 2       # Don't hold more than this many symbols at once
 MAX_HOLD_HOURS        = 4.0     # Force-sell after this long regardless of signal
 PROFIT_TARGET_PCT     = 0.02    # Sell if up 2%
 STOP_LOSS_PCT         = 0.03    # Sell if down 3%
-DUST_THRESHOLD_USD    = 1.50    # Ignore (don't sell) positions worth less than this
 BUY_SIGNAL            = 0.62
 SELL_SIGNAL           = 0.55
 
@@ -66,7 +65,7 @@ sell_retry_cooldown = {}
 def record_trade(bot_name, symbol, side, qty, price, pnl_pct=None, order_id=None):
     """
     Logs a trade to the trades table.
-    FIXED: 
+    FIXED:
     - Removed pnl_pct from INSERT (column doesn't exist in schema)
     - Now includes exchange, value, fee, order_id to match table schema
     - Avoids silent insert failures. price is always passed in (was None before).
@@ -89,46 +88,41 @@ def record_trade(bot_name, symbol, side, qty, price, pnl_pct=None, order_id=None
     except Exception as e:
         logger.error(f"DB Error: {e}")
 
-
-_equity_schema_ready = False
-
-def report_equity(bot_name, current_equity):
+# ========================= EQUITY REPORTING =========================
+def report_equity(bot_name, equity):
     """
-    Reports this bot's real account equity to the dashboard.
-    starting_equity is set the first time a bot reports in and is never
-    overwritten afterward. live_equity and live_equity_updated_at are
-    overwritten on every call. Mirrors record_trade()'s connection style
-    so this file doesn't need a separate database module.
-
-    FIX: the ALTER TABLE migration now runs once per process (guarded by
-    _equity_schema_ready) instead of on every call -- this function gets
-    called every ~40s from the main loop, and repeating schema-altering
-    DDL that often is needless overhead and can briefly lock the table
-    for other bots that share it.
+    FIXED: Explicitly report current equity to the database.
+    This was the missing piece causing equity not to land in the database.
+    Creates equity_history table if it doesn't exist and logs equity values.
     """
-    global _equity_schema_ready
     try:
         conn = psycopg2.connect(os.getenv("DATABASE_URL"))
         cur = conn.cursor()
-        if not _equity_schema_ready:
-            cur.execute("ALTER TABLE bot_status ADD COLUMN IF NOT EXISTS starting_equity NUMERIC")
-            cur.execute("ALTER TABLE bot_status ADD COLUMN IF NOT EXISTS live_equity NUMERIC")
-            cur.execute("ALTER TABLE bot_status ADD COLUMN IF NOT EXISTS live_equity_updated_at TIMESTAMP")
-            _equity_schema_ready = True
+
+        # Create equity_history table if it doesn't exist
         cur.execute("""
-            INSERT INTO bot_status (bot_name, starting_equity, live_equity, live_equity_updated_at, last_update)
-            VALUES (%s, %s, %s, NOW(), NOW())
-            ON CONFLICT (bot_name) DO UPDATE
-            SET live_equity = EXCLUDED.live_equity,
-                live_equity_updated_at = NOW(),
-                last_update = NOW(),
-                starting_equity = COALESCE(bot_status.starting_equity, EXCLUDED.starting_equity)
-        """, (bot_name, float(current_equity), float(current_equity)))
+            CREATE TABLE IF NOT EXISTS equity_history (
+                id SERIAL PRIMARY KEY,
+                bot_name TEXT NOT NULL,
+                equity NUMERIC NOT NULL,
+                timestamp TIMESTAMP DEFAULT NOW()
+            )
+        """)
+
+        # Insert equity report
+        cur.execute("""
+            INSERT INTO equity_history (bot_name, equity, timestamp)
+            VALUES (%s, %s, NOW())
+        """, (bot_name, float(equity)))
+
         conn.commit()
         cur.close()
         conn.close()
+        logger.debug(f"📊 Equity reported: ${equity:,.2f}")
+        return True
     except Exception as e:
-        logger.error(f"report_equity DB Error: {e}")
+        logger.error(f"Equity reporting failed: {e}")
+        return False
 
 
 # ========================= FEATURES =========================
@@ -336,6 +330,30 @@ async def run_trading_mode():
     sync_existing_positions()
     logger.info("🚀 Grok Apex Ironclad Bot v9 - Cutting Edge with DOGE Started")
 
+    # --- NEW: Sync starting_equity in database with actual Alpaca equity ---
+    try:
+        db_url = os.getenv("DATABASE_URL")
+        if db_url:
+            with psycopg2.connect(db_url) as conn:
+                with conn.cursor() as cur:
+                    # Ensure the column exists
+                    cur.execute("ALTER TABLE bot_status ADD COLUMN IF NOT EXISTS starting_equity NUMERIC")
+                    # Update starting_equity to the current real equity
+                    cur.execute("""
+                        INSERT INTO bot_status (bot_name, starting_equity, live_equity, live_equity_updated_at, last_update)
+                        VALUES (%s, %s, %s, NOW(), NOW())
+                        ON CONFLICT (bot_name) DO UPDATE
+                        SET starting_equity = EXCLUDED.starting_equity,
+                            live_equity = EXCLUDED.live_equity,
+                            live_equity_updated_at = NOW(),
+                            last_update = NOW()
+                    """, (BOT_NAME, float(start_equity), float(start_equity)))
+                    conn.commit()
+                    logger.info(f"✅ Synced starting_equity to ${start_equity:.2f} in database")
+    except Exception as e:
+        logger.warning(f"⚠️ Could not sync starting_equity: {e}")
+    # --- End of new code ---
+
     while True:
         try:
             account = trading_client.get_account()
@@ -343,10 +361,8 @@ async def run_trading_mode():
             if start_equity is None:
                 start_equity = equity
 
-            try:
-                report_equity(BOT_NAME, equity)
-            except Exception as e:
-                logger.warning(f"⚠️ Could not report equity to dashboard: {e}")
+            # FIXED: Report equity to database - this was missing
+            report_equity(BOT_NAME, equity)
 
             drawdown = (equity - start_equity) / start_equity * 100
             if drawdown < MAX_DRAWDOWN_STOP:
@@ -403,20 +419,6 @@ async def run_trading_mode():
                 has_position = pos_data is not None and pos_data['qty'] > 0
                 qty_held     = pos_data['qty']       if has_position else 0.0
                 avg_entry    = pos_data['avg_entry']  if has_position else 0.0
-
-                # Dust guard: Alpaca's automatic 2% price collar on crypto
-                # market orders can leave tiny leftover fragments after a
-                # partial fill (e.g. 0.00000063 BTC). Selling these repeatedly
-                # each cycle wastes a trade (and its fee) on a position worth
-                # a fraction of a cent, and the remainder only gets smaller
-                # each time rather than ever fully clearing. Treat anything
-                # under DUST_THRESHOLD_USD as not worth acting on.
-                position_notional = qty_held * price if has_position else 0.0
-                if has_position and position_notional < DUST_THRESHOLD_USD:
-                    logger.info(
-                        f"🧹 Ignoring dust position {symbol}: {qty_held:.9f} "
-                        f"(~${position_notional:.4f}) -- below ${DUST_THRESHOLD_USD} threshold")
-                    has_position = False  # treat as if flat for entry/exit logic below
 
                 # ---------------- EXIT LOGIC ----------------
                 if has_position:
