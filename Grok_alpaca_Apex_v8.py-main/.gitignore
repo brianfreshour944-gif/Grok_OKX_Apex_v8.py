@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+
+# PyTorch models
+*.pth
+
+# Data
+*.csv # If you don't want to commit historical_data.csv, uncomment this
+
+# Environment data
+.env
+.venv
+
+# Logs
+*.log
+
+# Jupyter/Colab specific
+.ipynb_checkpoints/
