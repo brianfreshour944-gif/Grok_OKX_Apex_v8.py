@@ -15,7 +15,6 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.data.historical import CryptoHistoricalDataClient
-from alpaca.data import CryptoDataStream
 from alpaca.data.requests import CryptoBarsRequest
 from alpaca.data.timeframe import TimeFrame
 
@@ -42,7 +41,13 @@ MAX_HOLD_HOURS        = 4.0     # Force-sell after this long regardless of signa
 PROFIT_TARGET_PCT     = 0.02    # Sell if up 2%
 STOP_LOSS_PCT         = 0.03    # Sell if down 3%
 BUY_SIGNAL            = 0.62
-SELL_SIGNAL           = 0.55
+SELL_SIGNAL           = 0.45    # FIX: widened gap from BUY_SIGNAL (was 0.55) to reduce
+                                 # exits on model noise right around the 0.5 midpoint
+
+# --- NEW: fixes for dust-order bug and signal-exit whipsaw (see log analysis) ---
+MIN_POSITION_USD              = 5.0   # ignore/never re-sell positions worth less than this
+MIN_HOLD_HOURS_BEFORE_SIGNAL  = 0.5   # don't let a weak-signal reading exit a position
+                                       # until it's been held at least this long
 
 SEQUENCE_LEN = 32
 MODEL_PATH = "grok_gqa_v9_best.pth"
@@ -52,7 +57,7 @@ API_SECRET = os.getenv("APCA_API_SECRET_KEY")
 PAPER = os.getenv("APCA_API_PAPER", "true").lower() == "true"
 
 trading_client = TradingClient(api_key=API_KEY, secret_key=API_SECRET, paper=PAPER)
-crypto_stream = CryptoDataStream()
+data_client = CryptoHistoricalDataClient()
 
 cooldown_until = {symbol: 0.0 for symbol in SYMBOLS}
 entry_time     = {}   # symbol -> timestamp, tracks how long a position has been held
@@ -60,6 +65,7 @@ start_equity   = None
 
 # --- Track sell retry attempts to prevent spam ---
 sell_retry_cooldown = {}
+
 
 # ========================= SAFE POSTGRESQL =========================
 def record_trade(bot_name, symbol, side, qty, price, pnl_pct=None, order_id=None):
@@ -124,6 +130,7 @@ def report_equity(bot_name, equity):
         logger.error(f"Equity reporting failed: {e}")
         return False
 
+
 # ========================= FEATURES =========================
 def safe_add_features(df: pd.DataFrame) -> pd.DataFrame:
     required = ['open', 'high', 'low', 'close', 'volume']
@@ -159,6 +166,25 @@ def safe_add_features(df: pd.DataFrame) -> pd.DataFrame:
         # FIX: clean inf values that previously crashed the scaler
         df[col] = df[col].replace([np.inf, -np.inf], 0.0)
     return df[FEATURE_COLS]
+
+
+def compute_regime_and_trend(df: pd.DataFrame):
+    try:
+        tr = pd.concat([
+            df['high'] - df['low'],
+            (df['high'] - df['close'].shift()).abs(),
+            (df['low']  - df['close'].shift()).abs()
+        ], axis=1).max(axis=1)
+        atr     = tr.rolling(14).mean().iloc[-1]
+        price   = df['close'].iloc[-1]
+        atr_pct = (atr / price) * 100 if price > 0 else 0.0
+        ema50   = df['close'].ewm(span=50).mean().iloc[-1]
+        trend   = "up" if price > ema50 else "down"
+        regime  = "wild" if atr_pct > 4.0 else "normal" if atr_pct > 2.0 else "quiet"
+        return regime, trend, round(atr_pct, 2)
+    except Exception:
+        return "normal", "neutral", 2.0
+
 
 # ========================= MODEL =========================
 class SafeMLPredictor:
@@ -202,6 +228,10 @@ class SafeMLPredictor:
         except Exception as e:
             logger.error(f"Prediction error: {e}")
             return 0.5
+
+
+predictor = SafeMLPredictor(MODEL_PATH, SEQUENCE_LEN)
+
 
 # ========================= PORTFOLIO HELPERS =========================
 def get_all_positions():
@@ -252,7 +282,7 @@ def sell_largest_position():
             if time_since_attempt < 300:  # 5 minute cooldown
                 logger.warning(
                     f"⏳ Sell retry cooldown for {largest.symbol} "
-                    f"({300 - time_since_attempt:.0f}s remaining)") 
+                    f"({300 - time_since_attempt:.0f}s remaining)")
                 return
         
         logger.warning(
@@ -276,6 +306,7 @@ def sell_largest_position():
     except Exception as e:
         logger.error(f"sell_largest_position failed: {e}")
 
+
 # ========================= STARTUP SYNC =========================
 def sync_existing_positions():
     """
@@ -297,6 +328,7 @@ def sync_existing_positions():
                     f"♻️  Restored: {sym} | qty={data['qty']:.6f} | "
                     f"avg_entry=${data['avg_entry']:.4f}")
                 break
+
 
 # ========================= MAIN LOOP =========================
 async def run_trading_mode():
@@ -390,7 +422,15 @@ async def run_trading_mode():
                 # --- FIXED: use cached positions dict instead of per-symbol
                 # get_position() call which had no fallback on failure ---
                 pos_data     = current_positions.get(alpaca_sym)
-                has_position = pos_data is not None and pos_data['qty'] > 0
+                # FIX: require a minimum dollar value, not just qty > 0, so leftover
+                # dust from rounding drift after a sell doesn't get treated as a
+                # real open position and re-sold every cycle (see log: repeated
+                # sub-cent SOL/ETH/BTC "sell" orders right after the real sell)
+                has_position = (
+                    pos_data is not None
+                    and pos_data['qty'] > 0
+                    and pos_data['market_value'] >= MIN_POSITION_USD
+                )
                 qty_held     = pos_data['qty']       if has_position else 0.0
                 avg_entry    = pos_data['avg_entry']  if has_position else 0.0
 
@@ -406,7 +446,7 @@ async def run_trading_mode():
                         exit_reason = f"🛑 Stop loss ({pnl_pct*100:.2f}%)"
                     elif held_hours >= MAX_HOLD_HOURS:
                         exit_reason = f"⏰ Max hold time ({held_hours:.1f}h)"
-                    elif signal < SELL_SIGNAL:
+                    elif held_hours >= MIN_HOLD_HOURS_BEFORE_SIGNAL and signal < SELL_SIGNAL:
                         exit_reason = f"📉 Signal weak ({signal:.3f})"
 
                     if exit_reason:
@@ -481,7 +521,7 @@ async def run_trading_mode():
             logger.error(f"Critical loop error: {e}")
             await asyncio.sleep(30)
 
-# ========================= ORDER EXECUTION =========================
+
 async def place_order(symbol, side, qty, price=None):
     """FIXED: now passes price and order.id into record_trade instead of None."""
     try:
@@ -500,11 +540,11 @@ async def place_order(symbol, side, qty, price=None):
         logger.error(f"Order failed: {e}")
         return False
 
-# ========================= DATA FETCHING =========================
+
 async def get_clean_ohlcv_dataframe(symbol):
     try:
         req = CryptoBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Minute, limit=600)
-        bars = crypto_stream.get_crypto_bars(req).data.get(symbol, [])
+        bars = data_client.get_crypto_bars(req).data.get(symbol, [])
         if len(bars) < SEQUENCE_LEN:
             return None
         df = pd.DataFrame([{
@@ -530,6 +570,6 @@ async def get_clean_ohlcv_dataframe(symbol):
         logger.error(f"Data fetch error {symbol}: {e}")
         return None
 
-# ========================= LAUNCH =========================
+
 if __name__ == "__main__":
     asyncio.run(run_trading_mode())
