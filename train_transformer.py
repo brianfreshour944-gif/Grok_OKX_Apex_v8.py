@@ -27,7 +27,13 @@ logger = logging.getLogger(__name__)
 
 # ========================= CONFIG =========================
 BOT_NAME = os.getenv("BOT_NAME", "Grok_Alpaca_Apex_v9_CuttingEdge")
-# SYMBOLS will be generated dynamically by `scan_stable_assets()`
+# Seed list used at startup (for cooldown_until / sync_existing_positions);
+# refreshed every cycle by `scan_stable_assets()`.
+SYMBOLS = [
+    "BTC/USD", "ETH/USD", "SOL/USD", "DOGE/USD", "LTC/USD", "BCH/USD",
+    "LINK/USD", "UNI/USD", "AVAX/USD", "DOT/USD", "AAVE/USD", "ADA/USD",
+    "SHIB/USD", "ATOM/USD", "GRT/USD", "MKR/USD", "COMP/USD", "NEAR/USD"
+]
 
 ACCOUNT_BASE          = float(os.getenv("ACCOUNT_BASE", 10000))
 BASE_RISK_PERCENT     = 0.006
@@ -228,7 +234,9 @@ def compute_regime_and_trend(df: pd.DataFrame):
         ema50   = df['close'].ewm(span=50).mean().iloc[-1]
         trend   = "up" if price > ema50 else "down"
         regime  = "wild" if atr_pct > 4.0 else "normal" if atr_pct > 2.0 else "quiet"
-    return regime, trend, round(atr_pct, 2)
+        return regime, trend, round(atr_pct, 2)
+    except Exception:
+        return "normal", "neutral", 2.0
 
 # -------------------------------------------------
 # Volatility‑Adjusted Risk Sizing
@@ -247,8 +255,6 @@ def calculate_adjusted_risk(equity: float, base_risk_percent: float, atr_pct: fl
         adjusted = equity * base_risk_percent
     # Enforce hard cap
     return min(adjusted, MAX_SINGLE_TRADE_USD)
-    except Exception:
-        return "normal", "neutral", 2.0
 
 
 # ========================= MODEL =========================
@@ -466,21 +472,20 @@ async def run_trading_mode():
                     f"Holding off on buys.")
                 buys_allowed = False
 
-# -------------------------------------------------
-# Main trading loop – now uses dynamic asset scanner
-# -------------------------------------------------
-for symbol in SYMBOLS:
-    # Dynamically fetch high‑volume, stable assets each cycle
-    active_symbols = await scan_stable_assets(limit_scope=35)
+            # -------------------------------------------------
+            # Main trading loop – now uses dynamic asset scanner
+            # -------------------------------------------------
+            # Dynamically fetch high‑volume, stable assets each cycle
+            active_symbols = await scan_stable_assets(limit_scope=35)
 
-    # Ensure cooldown entries exist for any newly discovered symbols
-    for sym in active_symbols:
-        if sym not in cooldown_until:
-            cooldown_until[sym] = 0.0
+            # Ensure cooldown entries exist for any newly discovered symbols
+            for sym in active_symbols:
+                if sym not in cooldown_until:
+                    cooldown_until[sym] = 0.0
 
-    for symbol in active_symbols:
-        now        = time.time()
-        alpaca_sym = normalize_symbol(symbol)
+            for symbol in active_symbols:
+                now        = time.time()
+                alpaca_sym = normalize_symbol(symbol)
 
                 if now < cooldown_until.get(symbol, 0):
                     continue
@@ -512,7 +517,7 @@ for symbol in SYMBOLS:
                 avg_entry    = pos_data['avg_entry']  if has_position else 0.0
 
                 # ---------------- EXIT LOGIC ----------------
-    if has_position:
+                if has_position:
                     pnl_pct     = (price - avg_entry) / avg_entry if avg_entry > 0 else 0.0
                     held_hours  = (now - entry_time.get(symbol, now)) / 3600
                     exit_reason = None
@@ -543,17 +548,17 @@ for symbol in SYMBOLS:
                     continue
 
                 # ---------------- ENTRY LOGIC ----------------
-    if signal > BUY_SIGNAL:
+                if signal > BUY_SIGNAL:
 
                     if not buys_allowed:
                         logger.info(f"🚫 BUY suppressed for {symbol} (cap/position limit)")
                         await asyncio.sleep(2)
                         continue
 
-        # Volatility‑adjusted risk sizing
-        adjusted_risk = calculate_adjusted_risk(equity, BASE_RISK_PERCENT, atr_pct)
-        qty = adjusted_risk / price
-        trade_value = qty * price
+                    # Volatility‑adjusted risk sizing
+                    adjusted_risk = calculate_adjusted_risk(equity, BASE_RISK_PERCENT, atr_pct)
+                    qty = adjusted_risk / price
+                    trade_value = qty * price
 
                     # --- NEW: headroom check ---
                     headroom = MAX_PORTFOLIO_VALUE - running_portfolio_value
