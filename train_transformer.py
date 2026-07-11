@@ -58,6 +58,49 @@ MIN_HOLD_HOURS_BEFORE_SIGNAL  = 0.5   # don't let a weak-signal reading exit a p
 SEQUENCE_LEN = 32
 MODEL_PATH = "grok_gqa_v9_best.pth"
 
+# --- NEW: regime-adaptive thresholds ---
+# compute_regime_and_trend() already classifies each symbol's volatility every
+# cycle ("wild" / "normal" / "quiet" by ATR%), but until now that label was
+# only logged, never used to change the entry/exit decision itself -- BUY/SELL
+# thresholds and profit/stop levels were flat constants regardless of regime.
+#
+# "normal" intentionally matches the original BUY_SIGNAL/SELL_SIGNAL/
+# PROFIT_TARGET_PCT/STOP_LOSS_PCT constants above 1:1, so a symbol sitting in
+# the normal band trades exactly as it did before this change.
+REGIME_PARAMS = {
+    # Wild swings: demand more conviction to enter (avoid buying noise),
+    # give it more room before stopping/taking profit (avoid getting
+    # shaken out by normal volatility in that regime).
+    "wild": {
+        "buy_signal":        0.68,
+        "sell_signal":       0.42,
+        "profit_target_pct": 0.03,
+        "stop_loss_pct":     0.045,
+    },
+    # Matches the pre-existing flat constants.
+    "normal": {
+        "buy_signal":        BUY_SIGNAL,
+        "sell_signal":       SELL_SIGNAL,
+        "profit_target_pct": PROFIT_TARGET_PCT,
+        "stop_loss_pct":     STOP_LOSS_PCT,
+    },
+    # Quiet chop: accept a weaker signal since big moves are unlikely
+    # anyway, but take profit/cut losses sooner since there's less room
+    # for a move to develop before it reverses.
+    "quiet": {
+        "buy_signal":        0.58,
+        "sell_signal":       0.47,
+        "profit_target_pct": 0.015,
+        "stop_loss_pct":     0.02,
+    },
+}
+
+def get_regime_params(regime: str) -> dict:
+    """Returns the threshold set for a regime, falling back to 'normal' for
+    any unrecognized label (e.g. the "normal"/"neutral"/2.0 fallback that
+    compute_regime_and_trend() returns on error)."""
+    return REGIME_PARAMS.get(regime, REGIME_PARAMS["normal"])
+
 API_KEY = os.getenv("APCA_API_KEY_ID")
 API_SECRET = os.getenv("APCA_API_SECRET_KEY")
 PAPER = os.getenv("APCA_API_PAPER", "true").lower() == "true"
@@ -510,6 +553,7 @@ async def run_trading_mode():
                     continue
 
                 regime, trend, atr_pct = compute_regime_and_trend(df)
+                regime_params = get_regime_params(regime)
                 signal = predictor.predict(df)
                 price  = df["close"].iloc[-1]
 
@@ -537,14 +581,14 @@ async def run_trading_mode():
                     held_hours  = (now - entry_time.get(symbol, now)) / 3600
                     exit_reason = None
 
-                    if pnl_pct >= PROFIT_TARGET_PCT:
-                        exit_reason = f"🎯 Profit target ({pnl_pct*100:.2f}%)"
-                    elif pnl_pct <= -STOP_LOSS_PCT:
-                        exit_reason = f"🛑 Stop loss ({pnl_pct*100:.2f}%)"
+                    if pnl_pct >= regime_params["profit_target_pct"]:
+                        exit_reason = f"🎯 Profit target ({pnl_pct*100:.2f}%) [{regime}]"
+                    elif pnl_pct <= -regime_params["stop_loss_pct"]:
+                        exit_reason = f"🛑 Stop loss ({pnl_pct*100:.2f}%) [{regime}]"
                     elif held_hours >= MAX_HOLD_HOURS:
                         exit_reason = f"⏰ Max hold time ({held_hours:.1f}h)"
-                    elif held_hours >= MIN_HOLD_HOURS_BEFORE_SIGNAL and signal < SELL_SIGNAL:
-                        exit_reason = f"📉 Signal weak ({signal:.3f})"
+                    elif held_hours >= MIN_HOLD_HOURS_BEFORE_SIGNAL and signal < regime_params["sell_signal"]:
+                        exit_reason = f"📉 Signal weak ({signal:.3f}) [{regime}]"
 
                     if exit_reason:
                         logger.info(
@@ -563,7 +607,7 @@ async def run_trading_mode():
                     continue
 
                 # ---------------- ENTRY LOGIC ----------------
-                if signal > BUY_SIGNAL:
+                if signal > regime_params["buy_signal"]:
 
                     if not buys_allowed:
                         logger.info(f"🚫 BUY suppressed for {symbol} (cap/position limit)")
