@@ -62,6 +62,21 @@ API_KEY = os.getenv("APCA_API_KEY_ID")
 API_SECRET = os.getenv("APCA_API_SECRET_KEY")
 PAPER = os.getenv("APCA_API_PAPER", "true").lower() == "true"
 
+# --- TEMP DEBUG: confirm what actually loaded, without logging the real
+# secret. Compare key_len/secret_len and the last4 against the values shown
+# in the Alpaca dashboard, then remove this block. ---
+if API_KEY and API_SECRET:
+    logger.info(
+        f"🔑 Credential check — key_len={len(API_KEY)} key_last4={API_KEY[-4:]} | "
+        f"secret_len={len(API_SECRET)} secret_last4={API_SECRET[-4:]} | paper={PAPER}"
+    )
+else:
+    logger.error(
+        f"🔑 Credential check — APCA_API_KEY_ID present={bool(API_KEY)}, "
+        f"APCA_API_SECRET_KEY present={bool(API_SECRET)}. "
+        f"One or both env vars are missing on this Coolify app."
+    )
+
 trading_client = TradingClient(api_key=API_KEY, secret_key=API_SECRET, paper=PAPER)
 data_client = CryptoHistoricalDataClient()
 
