@@ -52,6 +52,7 @@ SELL_SIGNAL           = 0.45    # FIX: widened gap from BUY_SIGNAL (was 0.55) to
 
 # --- NEW: fixes for dust-order bug and signal-exit whipsaw (see log analysis) ---
 MIN_POSITION_USD              = 5.0   # ignore/never re-sell positions worth less than this
+MIN_ORDER_USD                  = 10.0  # Alpaca's minimum crypto order notional; skip buys under this
 MIN_HOLD_HOURS_BEFORE_SIGNAL  = 0.5   # don't let a weak-signal reading exit a position
                                        # until it's been held at least this long
 
@@ -303,12 +304,16 @@ def calculate_adjusted_risk(equity: float, base_risk_percent: float, atr_pct: fl
     """
     Returns a dollar risk amount that is scaled down when the asset's ATR%
     exceeds a baseline volatility threshold.
+
+    NOTE: `atr_pct` arrives already expressed as a percentage number (e.g.
+    9.00 means "9%", 0.09 means "0.09%") -- see compute_regime_and_trend(),
+    which does `(atr/price)*100`. baseline_vol must be in that SAME scale.
     """
-    baseline_vol = 0.015  # 1.5% ATR baseline
+    baseline_vol = 1.5  # 1.5% ATR baseline (matches atr_pct's percentage-number scale)
     if atr_pct > baseline_vol and atr_pct > 0:
         vol_scaler = baseline_vol / atr_pct
         adjusted = equity * base_risk_percent * vol_scaler
-        logger.info(f"⚠️ High volatility (ATR%={atr_pct*100:.2f}%) – scaling risk by {vol_scaler:.2f}x")
+        logger.info(f"⚠️ High volatility (ATR%={atr_pct:.2f}%) – scaling risk by {vol_scaler:.2f}x")
     else:
         adjusted = equity * base_risk_percent
     # Enforce hard cap
@@ -618,6 +623,17 @@ async def run_trading_mode():
                     adjusted_risk = calculate_adjusted_risk(equity, BASE_RISK_PERCENT, atr_pct)
                     qty = adjusted_risk / price
                     trade_value = qty * price
+
+                    # --- NEW: minimum-order-size check, so a heavily
+                    # vol-scaled-down trade never gets submitted only to be
+                    # rejected by Alpaca's $10 crypto order minimum ---
+                    if trade_value < MIN_ORDER_USD:
+                        logger.info(
+                            f"🚫 BUY skipped {symbol}: sized trade ${trade_value:.2f} "
+                            f"below Alpaca's ${MIN_ORDER_USD:.2f} order minimum "
+                            f"(regime: {regime}, ATR%: {atr_pct:.2f}%)")
+                        await asyncio.sleep(2)
+                        continue
 
                     # --- NEW: headroom check ---
                     headroom = MAX_PORTFOLIO_VALUE - running_portfolio_value
