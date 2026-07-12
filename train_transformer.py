@@ -18,7 +18,8 @@ from alpaca.data.historical import CryptoHistoricalDataClient
 from alpaca.data.requests import CryptoBarsRequest
 from alpaca.data.timeframe import TimeFrame
 
-from ml_predictor import GrokGQA_Transformer, FEATURE_COLS
+from ml_predictor import GrokGQA_Transformer
+from feature_engineering import add_features, FEATURE_COLS
 
 load_dotenv()
 
@@ -210,40 +211,15 @@ def report_equity(bot_name, equity):
 
 
 # ========================= FEATURES =========================
-def safe_add_features(df: pd.DataFrame) -> pd.DataFrame:
-    required = ['open', 'high', 'low', 'close', 'volume']
-    for col in required:
-        if col not in df.columns:
-            df[col] = 0.0
-        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
-    df = df.copy()
-    df['returns'] = df['close'].pct_change().fillna(0.0)
-    df['vol_14']  = df['returns'].rolling(14).std().fillna(0.0)
-    delta    = df['close'].diff()
-    gain     = delta.clip(lower=0)
-    loss     = -delta.clip(upper=0)
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean()
-    rs       = avg_gain / avg_loss.replace(0, np.nan)
-    df['rsi'] = (100 - (100 / (1 + rs))).fillna(50.0).clip(0, 100)
-    exp1        = df['close'].ewm(span=12).mean()
-    exp2        = df['close'].ewm(span=26).mean()
-    macd_line   = exp1 - exp2
-    signal_line = macd_line.ewm(span=9).mean()
-    df['macd']  = (macd_line - signal_line).fillna(0.0)
-    tr = pd.concat([
-        df['high'] - df['low'],
-        (df['high'] - df['close'].shift()).abs(),
-        (df['low']  - df['close'].shift()).abs()
-    ], axis=1).max(axis=1)
-    df['atr'] = tr.rolling(14).mean().fillna(0.0)
-    for col in FEATURE_COLS:
-        if col not in df.columns:
-            df[col] = 0.0
-        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
-        # FIX: clean inf values that previously crashed the scaler
-        df[col] = df[col].replace([np.inf, -np.inf], 0.0)
-    return df[FEATURE_COLS]
+# NOTE: feature computation now comes from the shared feature_engineering.py
+# module (imported above), the same one trading_env.py uses for training and
+# ml_predictor.py uses for backtest_engine.py. This file previously had its
+# own diverged safe_add_features() that (a) never computed 'bb_width' at all
+# -- silently feeding the model a constant 0.0 for that input on every live
+# prediction -- and (b) computed rsi/macd/atr with different formulas than
+# training used. That's a real train/serve skew bug, not just a style
+# difference: the model was making live decisions on inputs that didn't
+# match what it learned on. Removed in favor of the single shared pipeline.
 
 # -------------------------------------------------
 # Dynamic Stable‑Asset Scanner
@@ -356,7 +332,7 @@ class SafeMLPredictor:
 
     def predict(self, df):
         try:
-            df_feat = safe_add_features(df.copy())
+            df_feat = add_features(df.copy())
             data    = df_feat.tail(self.seq_len).values.astype(np.float32)
             if len(data) < self.seq_len:
                 return 0.5
