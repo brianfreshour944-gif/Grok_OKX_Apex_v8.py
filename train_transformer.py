@@ -36,13 +36,26 @@ SYMBOLS = [
 ]
 
 ACCOUNT_BASE          = float(os.getenv("ACCOUNT_BASE", 10000))
-BASE_RISK_PERCENT     = 0.006
-MAX_SINGLE_TRADE_USD  = 120
+BASE_RISK_PERCENT     = 0.02    # UPDATED: cap each individual position at 2% of
+                                 # current equity, so most of the account stays
+                                 # in reserve. This is the primary sizing rule --
+                                 # see calculate_adjusted_risk(), which multiplies
+                                 # this against the ACTUAL current equity every
+                                 # cycle (not a fixed starting balance), so the
+                                 # 2% cap tracks the account as it grows/shrinks.
+MAX_SINGLE_TRADE_USD  = 100000  # UPDATED: generous absolute backstop only --
+                                 # not meant to bind in normal operation. The
+                                 # real per-trade ceiling is the 2% equity rule
+                                 # above; this just guards against a runaway
+                                 # equity value ever producing an absurd order.
 MAX_DRAWDOWN_STOP     = -10.0
 
 # --- NEW: position / risk management ---
-MAX_PORTFOLIO_VALUE   = 190.0   # Hard cap on total $ held across all symbols
-MAX_OPEN_POSITIONS    = 2       # Don't hold more than this many symbols at once
+# MAX_PORTFOLIO_VALUE is now computed dynamically each cycle from current
+# equity (equity * BASE_RISK_PERCENT * MAX_OPEN_POSITIONS) instead of this
+# fixed dollar figure, so the total-exposure cap scales with the account
+# instead of going stale as equity changes. See run_trading_mode().
+MAX_OPEN_POSITIONS    = 10      # Don't hold more than this many symbols at once
 MAX_HOLD_HOURS        = 4.0     # Force-sell after this long regardless of signal
 PROFIT_TARGET_PCT     = 0.02    # Sell if up 2%
 STOP_LOSS_PCT         = 0.03    # Sell if down 3%
@@ -245,7 +258,8 @@ async def scan_stable_assets(limit_scope: int = 35) -> list:
         candidates = [
             "BTC/USD", "ETH/USD", "SOL/USD", "DOGE/USD", "LTC/USD", "BCH/USD",
             "LINK/USD", "UNI/USD", "AVAX/USD", "DOT/USD", "AAVE/USD", "ADA/USD",
-            "SHIB/USD", "ATOM/USD", "GRT/USD", "MKR/USD", "COMP/USD", "NEAR/USD"
+            "SHIB/USD", "ATOM/USD", "GRT/USD", "MKR/USD", "COMP/USD", "NEAR/USD",
+            "XRP/USD", "BAT/USD", "CRV/USD", "SUSHI/USD", "XTZ/USD", "YFI/USD"
         ]
 
         volume_data = []
@@ -515,17 +529,23 @@ async def run_trading_mode():
             total_value        = sum(p['market_value'] for p in current_positions.values())
             buying_power       = get_buying_power()
 
+            # UPDATED: total exposure cap now scales with current equity --
+            # at most MAX_OPEN_POSITIONS positions, each capped at
+            # BASE_RISK_PERCENT (2%) of equity, so this tracks the account
+            # instead of a stale fixed dollar figure.
+            max_portfolio_value = equity * BASE_RISK_PERCENT * MAX_OPEN_POSITIONS
+
             logger.info(
                 f"📊 Cycle | Positions: {open_count}/{MAX_OPEN_POSITIONS} | "
                 f"Value: ${total_value:.2f} | BP: ${buying_power:.2f} | "
-                f"Drawdown: {drawdown:.2f}%")
+                f"Drawdown: {drawdown:.2f}% | Portfolio cap: ${max_portfolio_value:.2f}")
 
             buys_allowed             = True
             running_portfolio_value  = total_value
 
-            if total_value >= MAX_PORTFOLIO_VALUE:
+            if total_value >= max_portfolio_value:
                 logger.warning(
-                    f"📉 Portfolio ${total_value:.2f} >= cap ${MAX_PORTFOLIO_VALUE:.2f}")
+                    f"📉 Portfolio ${total_value:.2f} >= cap ${max_portfolio_value:.2f}")
                 sell_largest_position()
                 buys_allowed = False
 
@@ -539,7 +559,7 @@ async def run_trading_mode():
             # Main trading loop – now uses dynamic asset scanner
             # -------------------------------------------------
             # Dynamically fetch high‑volume, stable assets each cycle
-            active_symbols = await scan_stable_assets(limit_scope=35)
+            active_symbols = await scan_stable_assets(limit_scope=18)
 
             # Ensure cooldown entries exist for any newly discovered symbols
             for sym in active_symbols:
@@ -636,7 +656,7 @@ async def run_trading_mode():
                         continue
 
                     # --- NEW: headroom check ---
-                    headroom = MAX_PORTFOLIO_VALUE - running_portfolio_value
+                    headroom = max_portfolio_value - running_portfolio_value
                     if headroom < trade_value:
                         logger.warning(
                             f"🚫 BUY blocked {symbol}: only ${headroom:.2f} headroom "
