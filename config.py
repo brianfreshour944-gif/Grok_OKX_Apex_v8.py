@@ -1,0 +1,111 @@
+# config.py — All configuration, constants, and shared Alpaca clients.
+# Every other module imports from here to avoid circular imports.
+
+import logging
+import os
+
+from dotenv import load_dotenv
+from alpaca.trading.client import TradingClient
+from alpaca.data.historical import CryptoHistoricalDataClient
+
+load_dotenv()
+
+# ── Logging ────────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)s | %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+BOT_VERSION = "2026-07-13-r2"
+logger.info(f"🔖 Bot code version: {BOT_VERSION}")
+
+# ── Identity ───────────────────────────────────────────────────────────────────
+BOT_NAME = os.getenv("BOT_NAME", "Grok_Alpaca_Apex_v9_CuttingEdge")
+
+# ── Universe ───────────────────────────────────────────────────────────────────
+SYMBOLS = [
+    "BTC/USD", "ETH/USD", "SOL/USD", "DOGE/USD", "LTC/USD", "BCH/USD",
+    "LINK/USD", "UNI/USD", "AVAX/USD", "DOT/USD", "AAVE/USD", "ADA/USD",
+    "SHIB/USD", "ATOM/USD", "GRT/USD", "MKR/USD", "COMP/USD", "NEAR/USD",
+]
+
+# ── Risk / sizing ──────────────────────────────────────────────────────────────
+ACCOUNT_BASE         = float(os.getenv("ACCOUNT_BASE", 10000))
+BASE_RISK_PERCENT    = 0.02     # 2% of equity per position
+MAX_SINGLE_TRADE_USD = 100_000  # absolute backstop
+MAX_DRAWDOWN_STOP    = -10.0    # % drawdown at which trading halts
+
+# ── Position management ────────────────────────────────────────────────────────
+MAX_OPEN_POSITIONS           = 10
+MAX_HOLD_HOURS               = 4.0
+PROFIT_TARGET_PCT            = 0.02
+STOP_LOSS_PCT                = 0.03
+BUY_SIGNAL                   = 0.62
+SELL_SIGNAL                  = 0.45
+MIN_POSITION_USD             = 5.0   # ignore dust positions below this
+MIN_ORDER_USD                = 10.0  # Alpaca minimum crypto order notional
+MIN_HOLD_HOURS_BEFORE_SIGNAL = 0.5   # hold at least this long before signal-exit
+
+# ── Model / data ───────────────────────────────────────────────────────────────
+SEQUENCE_LEN = 32
+MODEL_PATH   = "grok_gqa_v9_best.pth"
+
+# ── Regime-adaptive thresholds ─────────────────────────────────────────────────
+REGIME_PARAMS = {
+    "wild": {
+        "buy_signal":        0.68,
+        "sell_signal":       0.42,
+        "profit_target_pct": 0.03,
+        "stop_loss_pct":     0.045,
+    },
+    "normal": {
+        "buy_signal":        BUY_SIGNAL,
+        "sell_signal":       SELL_SIGNAL,
+        "profit_target_pct": PROFIT_TARGET_PCT,
+        "stop_loss_pct":     STOP_LOSS_PCT,
+    },
+    "quiet": {
+        "buy_signal":        0.58,
+        "sell_signal":       0.47,
+        "profit_target_pct": 0.015,
+        "stop_loss_pct":     0.02,
+    },
+}
+
+def get_regime_params(regime: str) -> dict:
+    """Return threshold set for a regime, falling back to 'normal' for unknown labels."""
+    return REGIME_PARAMS.get(regime, REGIME_PARAMS["normal"])
+
+
+def fmt_price(p: float) -> str:
+    """Format a price with enough decimal places to be meaningful.
+    e.g. 0.0000084 -> '0.00000840', 238.72 -> '238.72'"""
+    if p == 0:
+        return "0.00"
+    if p >= 1:
+        return f"{p:.2f}"
+    if p >= 0.01:
+        return f"{p:.4f}"
+    if p >= 0.0001:
+        return f"{p:.6f}"
+    return f"{p:.8f}"
+
+
+# ── Alpaca clients (singletons, initialized once on import) ────────────────────
+API_KEY    = os.getenv("APCA_API_KEY_ID")
+API_SECRET = os.getenv("APCA_API_SECRET_KEY")
+PAPER      = os.getenv("APCA_API_PAPER", "true").lower() == "true"
+
+if API_KEY and API_SECRET:
+    logger.info(
+        f"🔑 Credential check — key_len={len(API_KEY)} key_last4={API_KEY[-4:]} | "
+        f"secret_len={len(API_SECRET)} secret_last4={API_SECRET[-4:]} | paper={PAPER}"
+    )
+else:
+    logger.error(
+        "🔑 Credential check — APCA_API_KEY_ID or APCA_API_SECRET_KEY missing."
+    )
+
+trading_client = TradingClient(api_key=API_KEY, secret_key=API_SECRET, paper=PAPER)
+data_client    = CryptoHistoricalDataClient()
