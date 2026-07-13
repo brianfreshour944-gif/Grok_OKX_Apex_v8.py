@@ -13,4 +13,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Run your application
-CMD ["python", "train_transformer.py"]
+CMD ["python", "main_bot.py"]
