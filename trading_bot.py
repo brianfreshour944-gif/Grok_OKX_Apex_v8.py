@@ -133,12 +133,16 @@ def report_equity(bot_name, equity):
 
 # ========================= FEATURES =========================
 def safe_add_features(df: pd.DataFrame) -> pd.DataFrame:
+    # FIX: copy first so we never mutate the caller's DataFrame
+    df = df.copy()
     required = ['open', 'high', 'low', 'close', 'volume']
     for col in required:
         if col not in df.columns:
             df[col] = 0.0
-        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
-    df = df.copy()
+        # FIX: .astype(float) forces the column out of object dtype where Python
+        # None survives pd.to_numeric and later causes:
+        #   TypeError: unsupported operand type(s) for -: 'float' and 'NoneType'
+        df[col] = pd.to_numeric(df[col], errors='coerce').astype(float).fillna(0.0)
     df['returns'] = df['close'].pct_change().fillna(0.0)
     df['vol_14']  = df['returns'].rolling(14).std().fillna(0.0)
     delta    = df['close'].diff()
@@ -170,15 +174,19 @@ def safe_add_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def compute_regime_and_trend(df: pd.DataFrame):
     try:
+        # FIX: sanitize before arithmetic to prevent NoneType crash
+        high  = pd.to_numeric(df['high'],  errors='coerce').astype(float).fillna(0.0)
+        low   = pd.to_numeric(df['low'],   errors='coerce').astype(float).fillna(0.0)
+        close = pd.to_numeric(df['close'], errors='coerce').astype(float).fillna(0.0)
         tr = pd.concat([
-            df['high'] - df['low'],
-            (df['high'] - df['close'].shift()).abs(),
-            (df['low']  - df['close'].shift()).abs()
+            high - low,
+            (high - close.shift()).abs(),
+            (low  - close.shift()).abs()
         ], axis=1).max(axis=1)
         atr     = tr.rolling(14).mean().iloc[-1]
-        price   = df['close'].iloc[-1]
+        price   = close.iloc[-1]
         atr_pct = (atr / price) * 100 if price > 0 else 0.0
-        ema50   = df['close'].ewm(span=50).mean().iloc[-1]
+        ema50   = close.ewm(span=50).mean().iloc[-1]
         trend   = "up" if price > ema50 else "down"
         regime  = "wild" if atr_pct > 4.0 else "normal" if atr_pct > 2.0 else "quiet"
         return regime, trend, round(atr_pct, 2)

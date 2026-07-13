@@ -46,7 +46,11 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
             for feature in FEATURE_COLS:
                 temp_df[feature] = FEATURE_DEFAULTS.get(feature, 0.0) 
             return temp_df
-        df_copy[col] = pd.to_numeric(df_copy[col], errors='coerce')
+        # FIX: .astype(float) evicts Python None from object-dtype columns;
+        # without it, pd.to_numeric(errors='coerce') can leave None in place when
+        # the column dtype stays 'object', causing:
+        #   TypeError: unsupported operand type(s) for -: 'float' and 'NoneType'
+        df_copy[col] = pd.to_numeric(df_copy[col], errors='coerce').astype(float)
 
     # Calculate 'returns'
     df_copy['returns'] = df_copy['close'].pct_change().fillna(0)
