@@ -1,38 +1,47 @@
-# feature_engineering.py - Robust, pandas_ta-free implementation
+# feature_engineering.py - pandas_ta-based indicators, with crash-safe sanitization.
 #
-# FIX: Removed pandas_ta_classic dependency entirely. All indicators are now
-# computed inline with pure pandas/numpy, matching deployed_bot.py's approach.
-# This eliminates the root cause of:
-#   TypeError: unsupported operand type(s) for -: 'float' and 'NoneType'
-# which was triggered inside pandas_ta_classic's internal ATR arithmetic when
-# columns contained Python None objects that survived object-dtype coercion.
+# Uses pandas_ta_classic for RSI/MACD/ATR/Bollinger Bands so live predictions
+# match what the model was actually trained on (trading_env.py's training
+# pipeline imported add_features() from this module while it used
+# pandas_ta_classic -- a hand-rolled rolling-mean RSI, for example, differs
+# from pandas_ta's Wilder-smoothed RSI by an average of ~5 points and up to
+# ~20 points on the same data, which is a real train/serve mismatch, not a
+# cosmetic difference).
+#
+# The actual bug that prompted removing pandas_ta_classic entirely
+# (TypeError: unsupported operand type(s) for -: 'float' and 'NoneType')
+# is fixed here differently: by sanitizing every column to float64 -- via
+# .astype(float), which evicts stray Python None from object-dtype columns --
+# both BEFORE handing data to pandas_ta and AFTER getting results back, so a
+# None can't survive to reach pandas_ta's internal arithmetic OR leak out of
+# it into the final feature matrix.
 
 import pandas as pd
 import numpy as np
+import pandas_ta_classic as ta
 
-# Define the feature columns that will be used by the model
 FEATURE_COLS = [
     'open', 'high', 'low', 'close', 'volume',
     'returns', 'vol_14', 'rsi', 'macd', 'atr', 'bb_width'
 ]
 
-# Define default values for features, used if calculation fails or data is insufficient
 FEATURE_DEFAULTS = {
-    'returns': 0.0,
-    'vol_14':  0.0,
-    'rsi':     50.0,   # Neutral RSI
-    'macd':    0.0,    # Neutral MACD
-    'atr':     0.0,
+    'returns':  0.0,
+    'vol_14':   0.0,
+    'rsi':      50.0,   # Neutral RSI
+    'macd':     0.0,    # Neutral MACD
+    'atr':      0.0,
     'bb_width': 0.0,
 }
+
 
 def _sanitize_col(series: pd.Series) -> pd.Series:
     """
     Force a Series to float64 with no None/NaN/inf values.
     - pd.to_numeric(errors='coerce') converts non-numeric to NaN
-    - .astype(float) evicts Python None from object-dtype columns;
-      without it None can survive and later cause:
-        TypeError: unsupported operand type(s) for -: 'float' and 'NoneType'
+    - .astype(float) evicts Python None from object-dtype columns; without
+      it, None can survive pd.to_numeric under some pandas versions and
+      later cause: TypeError: unsupported operand type(s) for -: 'float' and 'NoneType'
     - .replace([inf, -inf], 0.0) removes inf that breaks scalers
     - .fillna(0.0) removes any remaining NaN
     """
@@ -46,8 +55,11 @@ def _sanitize_col(series: pd.Series) -> pd.Series:
 
 def add_features(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Calculates and adds technical indicator features to the DataFrame.
-    All indicators computed with pure pandas/numpy — no external TA library.
+    Calculates and adds technical indicator features to the DataFrame using
+    pandas_ta_classic (matching the pipeline trading_env.py used for
+    training), with float64 sanitization on both sides of every pandas_ta
+    call so a stray None can never reach its internal arithmetic or escape
+    into the model's input matrix.
 
     Args:
         df: DataFrame with 'open', 'high', 'low', 'close', 'volume' columns.
@@ -60,56 +72,45 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
 
     df_copy = df.copy()
 
-    # ── Step 1: Sanitize all OHLCV inputs ──────────────────────────────────────
+    # ── Step 1: Sanitize all OHLCV inputs BEFORE they reach pandas_ta ──────────
     for col in ['open', 'high', 'low', 'close', 'volume']:
         if col not in df_copy.columns:
             df_copy[col] = 0.0
         df_copy[col] = _sanitize_col(df_copy[col])
 
-    close  = df_copy['close']
-    high   = df_copy['high']
-    low    = df_copy['low']
+    close = df_copy['close']
 
-    # ── Step 2: Returns & volatility ───────────────────────────────────────────
+    # ── Step 2: Returns & volatility ────────────────────────────────────────────
     df_copy['returns'] = close.pct_change().fillna(0.0)
-    df_copy['vol_14']  = df_copy['returns'].rolling(14).std().fillna(0.0)
+    df_copy['vol_14']  = df_copy['returns'].rolling(window=14).std()
 
-    # ── Step 3: RSI (Wilder / rolling-mean method) ─────────────────────────────
-    delta    = close.diff()
-    gain     = delta.clip(lower=0)
-    loss     = -delta.clip(upper=0)
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean()
-    rs       = avg_gain / avg_loss.replace(0, np.nan)
-    df_copy['rsi'] = (100 - (100 / (1 + rs))).fillna(50.0).clip(0, 100)
+    # ── Step 3: RSI (pandas_ta, Wilder-smoothed -- matches training) ───────────
+    rsi_result = ta.rsi(close, length=14)
+    df_copy['rsi'] = rsi_result if rsi_result is not None else np.nan
 
-    # ── Step 4: MACD (12/26/9 EMA) ─────────────────────────────────────────────
-    exp1        = close.ewm(span=12).mean()
-    exp2        = close.ewm(span=26).mean()
-    macd_line   = exp1 - exp2
-    signal_line = macd_line.ewm(span=9).mean()
-    df_copy['macd'] = (macd_line - signal_line).fillna(0.0)
+    # ── Step 4: MACD (pandas_ta) ────────────────────────────────────────────────
+    macd_result = ta.macd(close, fast=12, slow=26, signal=9)
+    if macd_result is not None and not macd_result.empty and 'MACD_12_26_9' in macd_result.columns:
+        df_copy['macd'] = macd_result['MACD_12_26_9']
+    else:
+        df_copy['macd'] = np.nan
 
-    # ── Step 5: ATR (14-period) ─────────────────────────────────────────────────
-    # Use sanitized local Series so .shift() NaN does not interact with None
-    prev_close = close.shift(1).fillna(close)   # fill first row with itself
-    tr = pd.concat([
-        (high - low).abs(),
-        (high - prev_close).abs(),
-        (low  - prev_close).abs(),
-    ], axis=1).max(axis=1)
-    df_copy['atr'] = tr.rolling(14).mean().fillna(0.0)
+    # ── Step 5: ATR (pandas_ta) ─────────────────────────────────────────────────
+    atr_result = ta.atr(df_copy['high'], df_copy['low'], close, length=14)
+    df_copy['atr'] = atr_result if atr_result is not None else np.nan
 
-    # ── Step 6: Bollinger Band Width (20-period, 2σ) ────────────────────────────
-    bb_mid   = close.rolling(20).mean()
-    bb_std   = close.rolling(20).std()
-    bb_upper = bb_mid + 2 * bb_std
-    bb_lower = bb_mid - 2 * bb_std
-    # Width = (upper - lower) / mid  (same as BBB in pandas_ta)
-    bb_width = (bb_upper - bb_lower) / bb_mid.replace(0, np.nan)
-    df_copy['bb_width'] = bb_width.fillna(0.0)
+    # ── Step 6: Bollinger Band Width (pandas_ta) ────────────────────────────────
+    bbands_result = ta.bbands(close, length=20, std=2.0)
+    if bbands_result is not None and not bbands_result.empty and 'BBB_20_2.0' in bbands_result.columns:
+        df_copy['bb_width'] = bbands_result['BBB_20_2.0']
+    else:
+        df_copy['bb_width'] = np.nan
 
-    # ── Step 7: Final sanitization pass on every output column ─────────────────
+    # ── Step 7: Fill rolling-window NaNs at the start of the series ────────────
+    df_copy = df_copy.ffill().bfill()
+
+    # ── Step 8: Final sanitization pass -- catches anything pandas_ta itself
+    # left as None/NaN/inf, so it can never reach the scaler/model ────────────
     for col in FEATURE_COLS:
         if col not in df_copy.columns:
             df_copy[col] = FEATURE_DEFAULTS.get(col, 0.0)
