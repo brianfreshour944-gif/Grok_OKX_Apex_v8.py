@@ -27,6 +27,9 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
 logger = logging.getLogger(__name__)
 
+BOT_VERSION = "2026-07-13-cce00d3"   # ← bump on each deploy to verify new code is live
+logger.info(f"🔖 Bot code version: {BOT_VERSION}")
+
 def fmt_price(p: float) -> str:
     """Format a price with enough decimal places to be meaningful.
     e.g. 0.0000084 -> '0.00000840', 238.72 -> '238.72'"""
