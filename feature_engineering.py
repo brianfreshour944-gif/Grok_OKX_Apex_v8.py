@@ -85,25 +85,49 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     df_copy['vol_14']  = df_copy['returns'].rolling(window=14).std()
 
     # ── Step 3: RSI (pandas_ta, Wilder-smoothed -- matches training) ───────────
-    rsi_result = ta.rsi(close, length=14)
-    df_copy['rsi'] = rsi_result if rsi_result is not None else np.nan
+    # Wrapped in try/except: pandas_ta_classic==0.3.14b1 has an internal bug
+    # where short windows (e.g. the model's 32-bar SEQUENCE_LEN, well under
+    # what a 26+9-period MACD needs to fully stabilize) can produce a raw
+    # Python None in an internal intermediate Series, which then crashes on
+    # subtraction with TypeError: unsupported operand type(s) for -: 'float'
+    # and 'NoneType' -- reproduced directly against this pinned version. This
+    # isn't fixable by sanitizing our input (it already is clean float64);
+    # it's the library's own arithmetic that produces the None internally.
+    try:
+        rsi_result = ta.rsi(close, length=14)
+        df_copy['rsi'] = rsi_result if rsi_result is not None else np.nan
+    except Exception as e:
+        print(f"Warning: ta.rsi failed ({e}), using NaN (will fall back to neutral default)")
+        df_copy['rsi'] = np.nan
 
     # ── Step 4: MACD (pandas_ta) ────────────────────────────────────────────────
-    macd_result = ta.macd(close, fast=12, slow=26, signal=9)
-    if macd_result is not None and not macd_result.empty and 'MACD_12_26_9' in macd_result.columns:
-        df_copy['macd'] = macd_result['MACD_12_26_9']
-    else:
+    try:
+        macd_result = ta.macd(close, fast=12, slow=26, signal=9)
+        if macd_result is not None and not macd_result.empty and 'MACD_12_26_9' in macd_result.columns:
+            df_copy['macd'] = macd_result['MACD_12_26_9']
+        else:
+            df_copy['macd'] = np.nan
+    except Exception as e:
+        print(f"Warning: ta.macd failed ({e}), using NaN (will fall back to neutral default)")
         df_copy['macd'] = np.nan
 
     # ── Step 5: ATR (pandas_ta) ─────────────────────────────────────────────────
-    atr_result = ta.atr(df_copy['high'], df_copy['low'], close, length=14)
-    df_copy['atr'] = atr_result if atr_result is not None else np.nan
+    try:
+        atr_result = ta.atr(df_copy['high'], df_copy['low'], close, length=14)
+        df_copy['atr'] = atr_result if atr_result is not None else np.nan
+    except Exception as e:
+        print(f"Warning: ta.atr failed ({e}), using NaN (will fall back to neutral default)")
+        df_copy['atr'] = np.nan
 
     # ── Step 6: Bollinger Band Width (pandas_ta) ────────────────────────────────
-    bbands_result = ta.bbands(close, length=20, std=2.0)
-    if bbands_result is not None and not bbands_result.empty and 'BBB_20_2.0' in bbands_result.columns:
-        df_copy['bb_width'] = bbands_result['BBB_20_2.0']
-    else:
+    try:
+        bbands_result = ta.bbands(close, length=20, std=2.0)
+        if bbands_result is not None and not bbands_result.empty and 'BBB_20_2.0' in bbands_result.columns:
+            df_copy['bb_width'] = bbands_result['BBB_20_2.0']
+        else:
+            df_copy['bb_width'] = np.nan
+    except Exception as e:
+        print(f"Warning: ta.bbands failed ({e}), using NaN (will fall back to neutral default)")
         df_copy['bb_width'] = np.nan
 
     # ── Step 7: Fill rolling-window NaNs at the start of the series ────────────
