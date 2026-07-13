@@ -27,6 +27,19 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
 logger = logging.getLogger(__name__)
 
+def fmt_price(p: float) -> str:
+    """Format a price with enough decimal places to be meaningful.
+    e.g. 0.0000084 -> '0.00000840', 238.72 -> '238.72'"""
+    if p == 0:
+        return "0.00"
+    if p >= 1:
+        return f"{p:.2f}"
+    if p >= 0.01:
+        return f"{p:.4f}"
+    if p >= 0.0001:
+        return f"{p:.6f}"
+    return f"{p:.8f}"
+
 # ========================= CONFIG =========================
 BOT_NAME = os.getenv("BOT_NAME", "Grok_Alpaca_Apex_v9_CuttingEdge")
 # Seed list used at startup (for cooldown_until / sync_existing_positions);
@@ -611,7 +624,7 @@ async def run_trading_mode():
 
                     if exit_reason:
                         logger.info(
-                            f"{exit_reason} — SELL {symbol} @ {price:.2f} | "
+                            f"{exit_reason} — SELL {symbol} @ {fmt_price(price)} | "
                             f"Regime: {regime}")
                         success = await place_order(symbol, OrderSide.SELL, qty_held, price)
                         if success:
@@ -619,8 +632,8 @@ async def run_trading_mode():
                             entry_time.pop(symbol, None)
                     else:
                         logger.info(
-                            f"📌 Holding {symbol} | Entry: ${avg_entry:.4f} | "
-                            f"Now: ${price:.4f} | PnL: {pnl_pct*100:+.2f}% | "
+                            f"📌 Holding {symbol} | Entry: ${fmt_price(avg_entry)} | "
+                            f"Now: ${fmt_price(price)} | PnL: {pnl_pct*100:+.2f}% | "
                             f"Held: {held_hours:.1f}h | Signal: {signal:.3f}")
                     await asyncio.sleep(2)
                     continue
@@ -670,7 +683,7 @@ async def run_trading_mode():
                         continue
 
                     logger.info(
-                        f"🟢 BUY {symbol} @ {price:.2f} | Regime: {regime} | "
+                        f"🟢 BUY {symbol} @ {fmt_price(price)} | Regime: {regime} | "
                         f"Signal: {signal:.3f} | Positions: {open_count}/{MAX_OPEN_POSITIONS}")
                     success = await place_order(symbol, OrderSide.BUY, qty, price)
 
