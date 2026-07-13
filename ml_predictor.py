@@ -88,8 +88,8 @@ class GrokGQA_Transformer(nn.Module):
 class SafeMLPredictor:
     def __init__(
         self, model_path,
+        seq_len=32,
         input_dim=len(FEATURE_COLS),  
-        seq_len=32,    # Fixed: Standard default value safely matched to 32
         embed_dim=128, num_layers=8, num_q_heads=16, num_kv_heads=4,
         dropout=0.1
     ):
