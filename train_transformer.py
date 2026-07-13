@@ -350,7 +350,7 @@ class SafeMLPredictor:
             with torch.no_grad():
                 return float(self.model(x).item())
         except Exception as e:
-            logger.error(f"Prediction error: {e}")
+            logger.error(f"Prediction error: {e}", exc_info=True)
             return 0.5
 
 
