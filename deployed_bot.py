@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import asyncio
 import logging
+import math
 import os
 import time
 import psycopg2
@@ -155,8 +156,12 @@ def record_trade(bot_name, symbol, side, qty, price, pnl_pct=None, order_id=None
     - Now includes exchange, value, fee, order_id to match table schema
     - Avoids silent insert failures. price is always passed in (was None before).
     """
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url:
+        logger.debug("DATABASE_URL not set — skipping trade DB log")
+        return
     try:
-        conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+        conn = psycopg2.connect(db_url)
         cur = conn.cursor()
         value = (price or 0.0) * qty
         cur.execute("""
@@ -180,8 +185,12 @@ def report_equity(bot_name, equity):
     This was the missing piece causing equity not to land in the database.
     Creates equity_history table if it doesn't exist and logs equity values.
     """
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url:
+        logger.debug("DATABASE_URL not set — skipping equity DB log")
+        return False
     try:
-        conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+        conn = psycopg2.connect(db_url)
         cur = conn.cursor()
 
         # Create equity_history table if it doesn't exist
@@ -470,7 +479,9 @@ async def run_trading_mode():
     # --- NEW: Sync starting_equity in database with actual Alpaca equity ---
     try:
         db_url = os.getenv("DATABASE_URL")
-        if db_url:
+        if not db_url:
+            logger.info("DATABASE_URL not set — skipping starting_equity sync")
+        elif db_url:
             with psycopg2.connect(db_url) as conn:
                 with conn.cursor() as cur:
                     # Ensure the column exists
@@ -684,6 +695,11 @@ async def run_trading_mode():
 async def place_order(symbol, side, qty, price=None):
     """FIXED: now passes price and order.id into record_trade instead of None."""
     try:
+        # FIX: truncate (floor) qty to 8 decimal places for SELL orders.
+        # Alpaca rejects sells where qty > available by even 1 ULP due to
+        # float64 precision drift (e.g. 22966090.330189046 vs .045 available).
+        if side == OrderSide.SELL:
+            qty = math.floor(qty * 1e8) / 1e8
         order = trading_client.submit_order(
             order_data=MarketOrderRequest(
                 symbol=symbol,
