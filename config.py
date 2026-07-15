@@ -1,14 +1,15 @@
 # config.py — All configuration, constants, and shared Alpaca clients.
 # Every other module imports from here to avoid circular imports.
+#
+# Environment variables are injected by Coolify directly into the container
+# process — os.getenv() reads them natively. No .env file or load_dotenv()
+# is needed or used.
 
 import logging
 import os
 
-from dotenv import load_dotenv
 from alpaca.trading.client import TradingClient
 from alpaca.data.historical import CryptoHistoricalDataClient
-
-load_dotenv()
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(

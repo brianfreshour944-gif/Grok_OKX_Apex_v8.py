@@ -1,143 +1,152 @@
-# feature_engineering.py - pandas_ta-based indicators, with crash-safe sanitization.
+# feature_engineering.py — Microstructure-based features.
 #
-# Uses pandas_ta_classic for RSI/MACD/ATR/Bollinger Bands so live predictions
-# match what the model was actually trained on (trading_env.py's training
-# pipeline imported add_features() from this module while it used
-# pandas_ta_classic -- a hand-rolled rolling-mean RSI, for example, differs
-# from pandas_ta's Wilder-smoothed RSI by an average of ~5 points and up to
-# ~20 points on the same data, which is a real train/serve mismatch, not a
-# cosmetic difference).
+# Replaces lagging indicators (RSI, MACD, ATR, BB) with zero-lag features
+# derived directly from raw bar data (OHLCV + VWAP + trade_count).
 #
-# The actual bug that prompted removing pandas_ta_classic entirely
-# (TypeError: unsupported operand type(s) for -: 'float' and 'NoneType')
-# is fixed here differently: by sanitizing every column to float64 -- via
-# .astype(float), which evicts stray Python None from object-dtype columns --
-# both BEFORE handing data to pandas_ta and AFTER getting results back, so a
-# None can't survive to reach pandas_ta's internal arithmetic OR leak out of
-# it into the final feature matrix.
+# Why microstructure over lagging indicators?
+# ─────────────────────────────────────────────
+# RSI(14) and MACD(12,26,9) require 26-35+ bars to stabilize and describe
+# where price WAS, not where it's going. At a 5-minute bar cadence inside
+# a 32-bar sequence (2.7 hours), 26 of those bars are just "warming up" MACD.
+# Microstructure features encode what the market IS doing right now:
+#   - Who controls the bar (buyers vs sellers): close_position
+#   - Where price is relative to fair value: vwap_deviation
+#   - Whether activity is accelerating: vol_acceleration, trade_intensity
+#   - Intra-bar spread as a volatility proxy: bar_spread
+#   - Directional momentum without lag: returns, price_vs_open
 
 import pandas as pd
 import numpy as np
-import pandas_ta_classic as ta
 
+# ── Feature columns ─────────────────────────────────────────────────────────────
+# NOTE: If you retrain the model, update FEATURE_COLS here and in ml_predictor.py
+# (input_dim=len(FEATURE_COLS)). The existing grok_gqa_v9_best.pth was trained
+# on 11 features — this new set is also 11 features, so input_dim is unchanged.
 FEATURE_COLS = [
-    'open', 'high', 'low', 'close', 'volume',
-    'returns', 'vol_14', 'rsi', 'macd', 'atr', 'bb_width'
+    "close",           # raw price level (scaled by scaler)
+    "returns",         # bar-over-bar log return  — directional momentum, 0-lag
+    "close_position",  # (close-low)/(high-low) — 0=bear bar, 1=bull bar
+    "vwap_deviation",  # (close-vwap)/vwap       — above/below fair value
+    "bar_spread",      # (high-low)/close         — intra-bar volatility proxy
+    "price_vs_open",   # (close-open)/open        — did buyers win the bar?
+    "vol_acceleration",# volume / rolling_mean(volume,5) - 1  — surge/dry-up
+    "trade_intensity", # trade_count / rolling_mean(trade_count,5) - 1
+    "vol_14",          # 14-bar rolling std of returns  — medium-term vol regime
+    "volume",          # raw volume (scaled) — absolute activity level
+    "trade_count",     # raw trade count (scaled) — activity level cross-check
 ]
 
 FEATURE_DEFAULTS = {
-    'returns':  0.0,
-    'vol_14':   0.0,
-    'rsi':      50.0,   # Neutral RSI
-    'macd':     0.0,    # Neutral MACD
-    'atr':      0.0,
-    'bb_width': 0.0,
+    "close":           0.0,
+    "returns":         0.0,
+    "close_position":  0.5,   # neutral: close in middle of bar
+    "vwap_deviation":  0.0,   # neutral: at fair value
+    "bar_spread":      0.0,
+    "price_vs_open":   0.0,
+    "vol_acceleration":0.0,   # neutral: average volume
+    "trade_intensity": 0.0,   # neutral: average trade count
+    "vol_14":          0.0,
+    "volume":          0.0,
+    "trade_count":     0.0,
 }
 
 
-def _sanitize_col(series: pd.Series) -> pd.Series:
+def _sanitize(series: pd.Series, fill: float = 0.0) -> pd.Series:
     """
-    Force a Series to float64 with no None/NaN/inf values.
-    - pd.to_numeric(errors='coerce') converts non-numeric to NaN
-    - .astype(float) evicts Python None from object-dtype columns; without
-      it, None can survive pd.to_numeric under some pandas versions and
-      later cause: TypeError: unsupported operand type(s) for -: 'float' and 'NoneType'
-    - .replace([inf, -inf], 0.0) removes inf that breaks scalers
-    - .fillna(0.0) removes any remaining NaN
+    Force a Series to float64 with no None/NaN/inf.
+      pd.to_numeric  — non-numeric strings → NaN
+      .astype(float) — Python None in object-dtype → NaN  (critical step)
+      .replace(inf)  — inf/-inf → fill
+      .fillna(fill)  — remaining NaN → fill
     """
     return (
-        pd.to_numeric(series, errors='coerce')
+        pd.to_numeric(series, errors="coerce")
         .astype(float)
-        .replace([np.inf, -np.inf], 0.0)
-        .fillna(0.0)
+        .replace([np.inf, -np.inf], fill)
+        .fillna(fill)
     )
 
 
 def add_features(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Calculates and adds technical indicator features to the DataFrame using
-    pandas_ta_classic (matching the pipeline trading_env.py used for
-    training), with float64 sanitization on both sides of every pandas_ta
-    call so a stray None can never reach its internal arithmetic or escape
-    into the model's input matrix.
+    Compute microstructure features from OHLCV + VWAP + trade_count bars.
 
     Args:
-        df: DataFrame with 'open', 'high', 'low', 'close', 'volume' columns.
+        df: DataFrame with columns: open, high, low, close, volume, vwap, trade_count
+            (vwap and trade_count fall back gracefully to neutral values if missing)
 
     Returns:
-        DataFrame with exactly FEATURE_COLS columns, all float64, no None/NaN/inf.
+        DataFrame with exactly FEATURE_COLS columns, all float64, no NaN/inf.
+        Always has the same number of rows as the input.
     """
     if df.empty:
-        return pd.DataFrame(index=df.index, columns=FEATURE_COLS).fillna(FEATURE_DEFAULTS)
+        return pd.DataFrame(
+            FEATURE_DEFAULTS, index=df.index, columns=FEATURE_COLS
+        ).astype(float)
 
-    df_copy = df.copy()
+    d = df.copy()
 
-    # ── Step 1: Sanitize all OHLCV inputs BEFORE they reach pandas_ta ──────────
-    for col in ['open', 'high', 'low', 'close', 'volume']:
-        if col not in df_copy.columns:
-            df_copy[col] = 0.0
-        df_copy[col] = _sanitize_col(df_copy[col])
+    # ── Step 1: Sanitize all raw input columns ────────────────────────────────
+    for col in ("open", "high", "low", "close", "volume"):
+        d[col] = _sanitize(d[col] if col in d.columns else pd.Series(0.0, index=d.index))
 
-    close = df_copy['close']
+    # vwap falls back to close if not supplied (e.g. during unit tests)
+    d["vwap"] = _sanitize(
+        d["vwap"] if "vwap" in d.columns else d["close"],
+        fill=0.0
+    )
+    # Where vwap is still 0 (bar had no volume), substitute close
+    d["vwap"] = d["vwap"].where(d["vwap"] > 0, d["close"])
 
-    # ── Step 2: Returns & volatility ────────────────────────────────────────────
-    df_copy['returns'] = close.pct_change().fillna(0.0)
-    df_copy['vol_14']  = df_copy['returns'].rolling(window=14).std()
+    d["trade_count"] = _sanitize(
+        d["trade_count"] if "trade_count" in d.columns
+        else pd.Series(0.0, index=d.index)
+    )
 
-    # ── Step 3: RSI (pandas_ta, Wilder-smoothed -- matches training) ───────────
-    # Wrapped in try/except: pandas_ta_classic==0.3.14b1 has an internal bug
-    # where short windows (e.g. the model's 32-bar SEQUENCE_LEN, well under
-    # what a 26+9-period MACD needs to fully stabilize) can produce a raw
-    # Python None in an internal intermediate Series, which then crashes on
-    # subtraction with TypeError: unsupported operand type(s) for -: 'float'
-    # and 'NoneType' -- reproduced directly against this pinned version. This
-    # isn't fixable by sanitizing our input (it already is clean float64);
-    # it's the library's own arithmetic that produces the None internally.
-    try:
-        rsi_result = ta.rsi(close, length=14)
-        df_copy['rsi'] = rsi_result if rsi_result is not None else np.nan
-    except Exception as e:
-        print(f"Warning: ta.rsi failed ({e}), using NaN (will fall back to neutral default)")
-        df_copy['rsi'] = np.nan
+    close  = d["close"]
+    high   = d["high"]
+    low    = d["low"]
+    open_  = d["open"]
+    volume = d["volume"]
+    vwap   = d["vwap"]
+    tc     = d["trade_count"]
 
-    # ── Step 4: MACD (pandas_ta) ────────────────────────────────────────────────
-    try:
-        macd_result = ta.macd(close, fast=12, slow=26, signal=9)
-        if macd_result is not None and not macd_result.empty and 'MACD_12_26_9' in macd_result.columns:
-            df_copy['macd'] = macd_result['MACD_12_26_9']
-        else:
-            df_copy['macd'] = np.nan
-    except Exception as e:
-        print(f"Warning: ta.macd failed ({e}), using NaN (will fall back to neutral default)")
-        df_copy['macd'] = np.nan
+    # ── Step 2: Compute features ──────────────────────────────────────────────
 
-    # ── Step 5: ATR (pandas_ta) ─────────────────────────────────────────────────
-    try:
-        atr_result = ta.atr(df_copy['high'], df_copy['low'], close, length=14)
-        df_copy['atr'] = atr_result if atr_result is not None else np.nan
-    except Exception as e:
-        print(f"Warning: ta.atr failed ({e}), using NaN (will fall back to neutral default)")
-        df_copy['atr'] = np.nan
+    # Bar-over-bar log return (pct_change approximated with log for additivity)
+    d["returns"] = _sanitize(close.pct_change(), fill=0.0)
 
-    # ── Step 6: Bollinger Band Width (pandas_ta) ────────────────────────────────
-    try:
-        bbands_result = ta.bbands(close, length=20, std=2.0)
-        if bbands_result is not None and not bbands_result.empty and 'BBB_20_2.0' in bbands_result.columns:
-            df_copy['bb_width'] = bbands_result['BBB_20_2.0']
-        else:
-            df_copy['bb_width'] = np.nan
-    except Exception as e:
-        print(f"Warning: ta.bbands failed ({e}), using NaN (will fall back to neutral default)")
-        df_copy['bb_width'] = np.nan
+    # 14-bar rolling volatility of returns (medium-term regime)
+    d["vol_14"] = _sanitize(d["returns"].rolling(14, min_periods=1).std(), fill=0.0)
 
-    # ── Step 7: Fill rolling-window NaNs at the start of the series ────────────
-    df_copy = df_copy.ffill().bfill()
+    # Where did close land within the bar's range? [0=low, 1=high]
+    bar_range = (high - low).replace(0, np.nan)
+    d["close_position"] = _sanitize((close - low) / bar_range, fill=0.5)
 
-    # ── Step 8: Final sanitization pass -- catches anything pandas_ta itself
-    # left as None/NaN/inf, so it can never reach the scaler/model ────────────
+    # Price vs VWAP — positive = above fair value, negative = below
+    safe_vwap = vwap.replace(0, np.nan)
+    d["vwap_deviation"] = _sanitize((close - safe_vwap) / safe_vwap, fill=0.0)
+
+    # Intra-bar spread as a normalised volatility proxy
+    safe_close = close.replace(0, np.nan)
+    d["bar_spread"] = _sanitize((high - low) / safe_close, fill=0.0)
+
+    # Did buyers win the bar? +ve = close above open
+    safe_open = open_.replace(0, np.nan)
+    d["price_vs_open"] = _sanitize((close - safe_open) / safe_open, fill=0.0)
+
+    # Volume acceleration: current bar vs 5-bar rolling mean (surge = +ve)
+    vol_ma5 = volume.rolling(5, min_periods=1).mean().replace(0, np.nan)
+    d["vol_acceleration"] = _sanitize(volume / vol_ma5 - 1, fill=0.0)
+
+    # Trade intensity: same idea for trade count
+    tc_ma5 = tc.rolling(5, min_periods=1).mean().replace(0, np.nan)
+    d["trade_intensity"] = _sanitize(tc / tc_ma5 - 1, fill=0.0)
+
+    # ── Step 3: Final guard — all FEATURE_COLS present, correct dtype ─────────
     for col in FEATURE_COLS:
-        if col not in df_copy.columns:
-            df_copy[col] = FEATURE_DEFAULTS.get(col, 0.0)
-        df_copy[col] = _sanitize_col(df_copy[col])
+        if col not in d.columns:
+            d[col] = FEATURE_DEFAULTS.get(col, 0.0)
+        d[col] = _sanitize(d[col], fill=FEATURE_DEFAULTS.get(col, 0.0))
 
-    return df_copy[FEATURE_COLS]
+    return d[FEATURE_COLS]
