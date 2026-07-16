@@ -1,14 +1,11 @@
-# ml_predictor.py — Fixed & Complete
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import os
 import joblib
-import pandas as pd 
+import pandas as pd
 
-# Import feature engineering function and constants
 from feature_engineering import add_features, FEATURE_COLS, FEATURE_DEFAULTS
 
 
@@ -56,8 +53,8 @@ class GQA_TransformerBlock(nn.Module):
 
 class GrokGQA_Transformer(nn.Module):
     def __init__(
-        self, input_dim, seq_len=32,  # Fixed: Default set to 32 steps
-        embed_dim=128, num_layers=8, num_q_heads=16, num_kv_heads=4, dropout=0.1  # Fixed: Default set to 8 layers
+        self, input_dim, seq_len=32,
+        embed_dim=128, num_layers=8, num_q_heads=16, num_kv_heads=4, dropout=0.1
     ):
         super().__init__()
         self.input_projection = nn.Linear(input_dim, embed_dim)
@@ -78,24 +75,23 @@ class GrokGQA_Transformer(nn.Module):
             x = layer(x)
         x = self.norm(x)
         x = self.output_head(x[:, -1, :])
-        return torch.sigmoid(x) 
+        return x   # <--- FIX: raw logits, no sigmoid
 
 
 # ==============================================================================
-# MLPredictor (for inference)  --  Loads trained model and scales input
+# MLPredictor (for inference)
 # ==============================================================================
 
 class SafeMLPredictor:
     def __init__(
         self, model_path,
         seq_len=32,
-        input_dim=len(FEATURE_COLS),  
+        input_dim=len(FEATURE_COLS),
         embed_dim=128, num_layers=8, num_q_heads=16, num_kv_heads=4,
         dropout=0.1
     ):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # FIX 1: Raise error if model not found, don't fall back to random weights
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"Model file not found at {model_path}")
 
@@ -105,17 +101,15 @@ class SafeMLPredictor:
             num_q_heads=num_q_heads, num_kv_heads=num_kv_heads,
             dropout=dropout
         ).to(self.device)
-        
-        # FIXED INDENTATION: strict=False is tucked safely inside the load logic
+
         try:
             self.model.load_state_dict(torch.load(model_path, map_location=self.device), strict=False)
-            print(f"✅ Model weights loaded successfully from {model_path} (Strict mode disabled)")
+            print(f"✅ Model weights loaded from {model_path}")
         except Exception as e:
             print(f"⚠️ Warning loading state dict: {e}")
 
-        self.seq_len = seq_len 
+        self.seq_len = seq_len
 
-        # FIX 2: Load StandardScaler if available
         scaler_path = os.path.join(os.path.dirname(model_path), 'feature_scaler.pkl')
         self.scaler = None
         if os.path.exists(scaler_path):
@@ -128,35 +122,28 @@ class SafeMLPredictor:
                 f"   Re-run train_transformer.py to generate feature_scaler.pkl."
             )
 
-    # ── inference ─────────────────────────────────────────────────────────────
-
     def predict(self, df: pd.DataFrame) -> float:
         """
-        Returns a float in [0, 1].
-        >0.51  → bullish signal (loosened bounds)
-        <0.49  → bearish signal (loosened bounds)
-        ~0.5   → no signal (or model uncertain)
+        Returns a probability in [0, 1].
+        >0.51 → bullish, <0.49 → bearish, ~0.5 → no signal.
         """
         try:
             df = df.copy()
-
-            # Use the centralized feature engineering function
             df_features = add_features(df)
-
-            # Extract the exact sequence chunk needed for inference matrix shape
             data = df_features[FEATURE_COLS].tail(self.seq_len).values.astype(np.float32)
 
             if len(data) < self.seq_len:
-                print(f"⚠️  Need {self.seq_len} bars for inference, only {len(data)} available.")
+                print(f"⚠️  Need {self.seq_len} bars, only {len(data)} available.")
                 return 0.5
 
-            # FIX: apply scaler — same transform used during training
             if self.scaler is not None:
                 data = self.scaler.transform(data).astype(np.float32)
 
-            x = torch.tensor(data).unsqueeze(0).to(self.device)  # (1, seq_len, 11)
+            x = torch.tensor(data).unsqueeze(0).to(self.device)  # (1, seq_len, n_features)
+
             with torch.no_grad():
-                pred = self.model(x).item()
+                raw_logits = self.model(x)          # raw logit
+                pred = torch.sigmoid(raw_logits).item()  # <--- FIX: sigmoid here
 
             return float(pred)
 
