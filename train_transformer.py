@@ -366,7 +366,7 @@ def train(
             xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
             pred = model(xb).squeeze(1)
-            loss = criterion(pred, yb)
+            loss = criterion(pred.view(-1), yb.float().view(-1))
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
@@ -381,7 +381,7 @@ def train(
             for xb, yb in val_loader:
                 xb, yb = xb.to(device), yb.to(device)
                 pred = model(xb).squeeze(1)
-                va_loss    += criterion(pred, yb).item() * len(yb)
+                va_loss += criterion(pred.view(-1), yb.float().view(-1)).item() * len(yb)
                 va_correct += ((pred > 0.5) == yb.bool()).sum().item()
 
         t_l = tr_loss / len(y_tr)
