@@ -6,7 +6,9 @@ Three bugs fixed vs the May 31 original
 ────────────────────────────────────────
 BUG 1 — Timeframe mismatch (FIXED):
   Old: TimeFrame.Hour, 60 days  → hourly bars
-  New: TimeFrame.Minute, resampled to 5-min → matches live bot cadence exactly
+  New: TimeFrame(15, TimeFrameUnit.Minute) → native 15-min bars, 180 days
+       (15-min bars have 3× less microstructure noise than 5-min bars;
+        180 days keeps window count comparable to the old 60-day 5-min run)
 
 BUG 2 — Label-offset (FIXED):
   Old: y = labels[idx + seq_len + target_horizon - 1]
@@ -61,7 +63,7 @@ import joblib
 
 from alpaca.data.historical import CryptoHistoricalDataClient
 from alpaca.data.requests import CryptoBarsRequest
-from alpaca.data.timeframe import TimeFrame
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 # Import from repo modules — run this script from the repo root directory.
 from feature_engineering import add_features, FEATURE_COLS
@@ -69,7 +71,13 @@ from ml_predictor import GrokGQA_Transformer
 
 # ── Hyperparameters ─────────────────────────────────────────────────────────────
 SEQ_LEN        = 32    # bars per input window (must match live bot SEQUENCE_LEN)
-TARGET_HORIZON = 12    # predict 12 × 5-min = 60 min ahead
+
+# FIX 1 — TIMEFRAME: 15-min bars are 3× less noisy than 5-min bars.
+#   6 bars × 15 min = 90-min lookahead — a clean, meaningful directional signal.
+# FIX 3 — HORIZON: 6 bars instead of 12 (12×5min=60min → 6×15min=90min).
+BAR_TIMEFRAME  = TimeFrame(15, TimeFrameUnit.Minute)  # native 15-min bars from Alpaca
+TARGET_HORIZON = 6     # predict 6 × 15-min = 90 min ahead
+
 EMBED_DIM      = 128
 NUM_LAYERS     = 8
 NUM_Q_HEADS    = 16
@@ -80,7 +88,7 @@ BATCH_SIZE     = 64
 LR             = 3e-4
 WEIGHT_DECAY   = 1e-4
 TRAIN_FRAC     = 0.80   # chronological — first 80% → train, last 20% → val
-DAYS_HISTORY   = 60     # calendar days of 5-min bars to fetch per symbol
+DAYS_HISTORY   = 180    # 180 days of 15-min bars ≈ same window count as 60d of 5-min
 PATIENCE       = 8      # early-stopping: halt if no val improvement for N epochs
 MODEL_OUT      = "grok_gqa_v9_best.pth"
 SCALER_OUT     = "feature_scaler.pkl"
@@ -116,17 +124,27 @@ def _get_data_client() -> CryptoHistoricalDataClient:
 
 
 # ── Data fetching ───────────────────────────────────────────────────────────────
-def fetch_5min_bars(client: CryptoHistoricalDataClient, symbol: str, days: int) -> pd.DataFrame | None:
+# FIX 1 — TIMEFRAME: Request native 15-min bars directly from Alpaca.
+#   The old approach fetched 1-min bars and resampled them to 5-min, which is
+#   equivalent to 5-min bars — still very noisy microstructure. Native 15-min
+#   bars from Alpaca have their VWAP calculated server-side over a real 15-min
+#   window, which is higher quality than a client-side volume-weighted resample.
+def fetch_bars(
+    client: CryptoHistoricalDataClient,
+    symbol: str,
+    days: int,
+    timeframe: TimeFrame = BAR_TIMEFRAME,
+) -> pd.DataFrame | None:
     """
-    Fetch 1-minute bars from Alpaca and resample to 5-minute bars.
+    Fetch native 15-minute bars from Alpaca.
     Returns DataFrame with: open, high, low, close, volume, vwap, trade_count
-    VWAP is resampled as a volume-weighted average — not a plain mean.
+    VWAP is provided by Alpaca and is already volume-weighted over the 15-min window.
     """
     try:
         start = datetime.now(tz=timezone.utc) - timedelta(days=days)
         req = CryptoBarsRequest(
             symbol_or_symbols=symbol,
-            timeframe=TimeFrame.Minute,
+            timeframe=timeframe,
             start=start,
         )
         raw_bars = client.get_crypto_bars(req).data.get(symbol, [])
@@ -146,32 +164,16 @@ def fetch_5min_bars(client: CryptoHistoricalDataClient, symbol: str, days: int) 
         } for b in raw_bars])
         df.set_index("timestamp", inplace=True)
 
-        # Strip timezone so resample works cleanly
+        # Strip timezone so index arithmetic works cleanly downstream
         if df.index.tz is not None:
             df.index = df.index.tz_localize(None)
 
-        # Build helper for volume-weighted VWAP aggregation
-        df["_vwap_x_vol"] = df["vwap"] * df["volume"]
+        # Where Alpaca returned vwap=0 (rare empty bars), fall back to close
+        df["vwap"] = df["vwap"].where(df["vwap"] > 0, df["close"])
 
-        df_5m = df.resample("5min").agg({
-            "open":        "first",
-            "high":        "max",
-            "low":         "min",
-            "close":       "last",
-            "volume":      "sum",
-            "_vwap_x_vol": "sum",
-            "trade_count": "sum",
-        }).dropna(subset=["close"])
-
-        # VWAP = Σ(vwap×vol) / Σvol per 5-min bar; fall back to close if no volume
-        df_5m["vwap"] = (
-            df_5m["_vwap_x_vol"] / df_5m["volume"].replace(0.0, float("nan"))
-        ).fillna(df_5m["close"])
-        df_5m.drop(columns=["_vwap_x_vol"], inplace=True)
-
-        df_5m = df_5m[df_5m["close"] > 0]
-        log.info(f"  {symbol}: {len(df_5m):,} 5-min bars fetched")
-        return df_5m
+        df = df[df["close"] > 0]
+        log.info(f"  {symbol}: {len(df):,} 15-min bars fetched")
+        return df
 
     except Exception as exc:
         log.error(f"  {symbol}: fetch failed — {exc}")
@@ -210,7 +212,7 @@ def build_arrays(
 
     for sym in symbols:
         log.info(f"Building windows for {sym} ...")
-        df_raw = fetch_5min_bars(client, sym, days)
+        df_raw = fetch_bars(client, sym, days)
 
         if df_raw is None or len(df_raw) < min_bars_needed:
             log.warning(f"  {sym}: only {0 if df_raw is None else len(df_raw)} bars — need {min_bars_needed}, skipping")
@@ -243,7 +245,7 @@ def build_arrays(
             all_y.append(label)
             windows_added += 1
 
-        log.info(f"  → {windows_added:,} windows from {sym}")
+        log.info(f"  → {windows_added:,} windows from {sym} ({horizon} × 15-min = {horizon*15}-min lookahead)")
 
     if not all_X:
         raise RuntimeError(
@@ -276,6 +278,51 @@ def chrono_split(
     """
     cut = int(len(y) * train_frac)
     return X[:cut], y[:cut], X[cut:], y[cut:]
+
+
+# ── Dataset balancing ────────────────────────────────────────────────────────────
+# FIX 2 — BALANCE: Downsample the majority class so the model gets exactly 50/50
+# labels during training.  Applied to the TRAIN split only — the val split keeps
+# its natural distribution so accuracy metrics reflect real-world conditions.
+#
+# Why undersample instead of oversample (SMOTE)?  The windows are already highly
+# overlapping (window i and i+1 share 31 of 32 bars), so duplicating windows via
+# SMOTE would create near-identical synthetic samples that add zero diversity.
+# Undersampling the majority class is the cleanest, leak-free approach here.
+def balance_dataset(
+    X: np.ndarray, y: np.ndarray, seed: int = 42
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Randomly undersample the majority class so both classes are exactly equal.
+
+    Args:
+        X: float32 array of shape (N, seq_len, n_features)
+        y: float32 array of shape (N,) with values in {0.0, 1.0}
+        seed: random seed for reproducibility
+
+    Returns:
+        X_bal, y_bal — balanced arrays (minority_count × 2 samples)
+    """
+    rng = np.random.default_rng(seed)
+
+    idx_up   = np.where(y == 1.0)[0]
+    idx_down = np.where(y == 0.0)[0]
+
+    minority_n = min(len(idx_up), len(idx_down))
+
+    idx_up_sampled   = rng.choice(idx_up,   size=minority_n, replace=False)
+    idx_down_sampled = rng.choice(idx_down, size=minority_n, replace=False)
+
+    idx_balanced = np.concatenate([idx_up_sampled, idx_down_sampled])
+    rng.shuffle(idx_balanced)  # shuffle so model doesn't see all-Up then all-Down
+
+    log.info(
+        f"  Balance: {len(y):,} → {len(idx_balanced):,} windows "
+        f"(dropped {len(y) - len(idx_balanced):,} majority-class samples)\n"
+        f"  New split: Up={minority_n:,} ({50.0:.1f}%)  "
+        f"Down={minority_n:,} ({50.0:.1f}%)"
+    )
+    return X[idx_balanced], y[idx_balanced]
 
 
 # ── PyTorch Dataset ─────────────────────────────────────────────────────────────
@@ -311,8 +358,14 @@ def train(
     X_tr, y_tr, X_va, y_va = chrono_split(X, y, TRAIN_FRAC)
     log.info(f"  Train: {len(y_tr):,} windows | Val: {len(y_va):,} windows")
 
-    # 3. Fit scaler on TRAINING data only — never touch val ─────────────────────
-    log.info("=== Phase 3: Fitting StandardScaler on training data only ===")
+    # 3. Balance TRAIN set only (val keeps natural distribution for honest metrics)
+    # FIX 2 — BALANCE: 50/50 majority-class undersampling eliminates the free
+    # 51% accuracy the model was exploiting by always predicting "Down".
+    log.info("=== Phase 3: Balancing training set to 50/50 ===")
+    X_tr, y_tr = balance_dataset(X_tr, y_tr)
+
+    # 4. Fit scaler on TRAINING data only — never touch val ─────────────────────
+    log.info("=== Phase 4: Fitting StandardScaler on training data only ===")
     n_tr, seq_len, n_feat = X_tr.shape
     n_va                  = len(y_va)
 
@@ -335,8 +388,8 @@ def train(
         batch_size=batch_size, shuffle=False,
     )
 
-    # 4. Instantiate model ───────────────────────────────────────────────────────
-    log.info("=== Phase 4: Building model ===")
+    # 5. Instantiate model ───────────────────────────────────────────────────────
+    log.info("=== Phase 5: Building model ===")
     model = GrokGQA_Transformer(
         input_dim    = n_feat,
         seq_len      = seq_len,
@@ -353,8 +406,8 @@ def train(
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=WEIGHT_DECAY)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=lr * 0.01)
 
-    # 5. Training loop ───────────────────────────────────────────────────────────
-    log.info("=== Phase 5: Training ===")
+    # 6. Training loop ───────────────────────────────────────────────────────────
+    log.info("=== Phase 6: Training ===")
     best_val_loss = float("inf")
     patience_ctr  = 0
 
