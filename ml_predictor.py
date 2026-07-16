@@ -34,20 +34,25 @@ class GQA_TransformerBlock(nn.Module):
         self.dropout  = nn.Dropout(dropout)
 
     def forward(self, x):
-        residual      = x
-        batch, seq, _ = x.shape
-        q = self.q_proj(x).view(batch, seq, self.num_q_heads,  self.head_dim).transpose(1, 2)
-        k = self.k_proj(x).view(batch, seq, self.num_kv_heads, self.head_dim).transpose(1, 2)
-        v = self.v_proj(x).view(batch, seq, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        # Pre-LN: Normalize BEFORE attention, residual bypasses normalization
+        residual = x
+        norm_x = self.norm1(x)
+        batch, seq, _ = norm_x.shape
+        
+        q = self.q_proj(norm_x).view(batch, seq, self.num_q_heads,  self.head_dim).transpose(1, 2)
+        k = self.k_proj(norm_x).view(batch, seq, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(norm_x).view(batch, seq, self.num_kv_heads, self.head_dim).transpose(1, 2)
         k = k.repeat_interleave(self.num_q_heads // self.num_kv_heads, dim=1)
         v = v.repeat_interleave(self.num_q_heads // self.num_kv_heads, dim=1)
+        
         attn = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         attn = attn.transpose(1, 2).contiguous().view(batch, seq, self.num_q_heads * self.head_dim)
-        x = self.dropout(self.out_proj(attn))
-        x = self.norm1(x + residual)
+        x = residual + self.dropout(self.out_proj(attn))
+        
+        # Pre-LN: Normalize BEFORE feed-forward network
         residual = x
-        x = self.ffn(x)
-        x = self.norm2(x + residual)
+        norm_x = self.norm2(x)
+        x = residual + self.ffn(norm_x)
         return x
 
 

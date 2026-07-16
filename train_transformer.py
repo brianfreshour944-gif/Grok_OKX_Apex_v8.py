@@ -404,7 +404,12 @@ def train(
 
     criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=WEIGHT_DECAY)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=lr * 0.01)
+    
+    # FIX: Use OneCycleLR for proper learning rate warmup
+    steps_per_epoch = len(train_loader)
+    scheduler = optim.lr_scheduler.OneCycleLR(
+        optimizer, max_lr=lr, epochs=epochs, steps_per_epoch=steps_per_epoch
+    )
 
     # 6. Training loop ───────────────────────────────────────────────────────────
     log.info("=== Phase 6: Training ===")
@@ -424,7 +429,8 @@ def train(
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             tr_loss    += loss.item() * len(yb)
-            tr_correct += ((pred > 0.5) == yb.bool()).sum().item()
+            # FIX: Raw logits threshold is 0.0 (which corresponds to probability 0.5)
+            tr_correct += ((pred > 0.0) == yb.bool()).sum().item()
         scheduler.step()
 
         # ── Validate ──
@@ -435,7 +441,8 @@ def train(
                 xb, yb = xb.to(device), yb.to(device)
                 pred = model(xb).squeeze(1)
                 va_loss += criterion(pred.view(-1), yb.float().view(-1)).item() * len(yb)
-                va_correct += ((pred > 0.5) == yb.bool()).sum().item()
+                # FIX: Raw logits threshold is 0.0 (which corresponds to probability 0.5)
+                va_correct += ((pred > 0.0) == yb.bool()).sum().item()
 
         t_l = tr_loss / len(y_tr)
         v_l = va_loss / len(y_va)
