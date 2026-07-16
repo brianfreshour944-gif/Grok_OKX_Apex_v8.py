@@ -79,7 +79,7 @@ BAR_TIMEFRAME  = TimeFrame(15, TimeFrameUnit.Minute)  # native 15-min bars from 
 TARGET_HORIZON = 6     # predict 6 × 15-min = 90 min ahead
 
 EMBED_DIM      = 128
-NUM_LAYERS     = 2
+NUM_LAYERS     = 8
 NUM_Q_HEADS    = 16
 NUM_KV_HEADS   = 4
 DROPOUT        = 0.1
