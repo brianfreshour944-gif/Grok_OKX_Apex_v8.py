@@ -349,7 +349,7 @@ def train(
     total_params = sum(p.numel() for p in model.parameters())
     log.info(f"  Parameters: {total_params:,}")
 
-    criterion = nn.BCELoss()
+    criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=WEIGHT_DECAY)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=lr * 0.01)
 
