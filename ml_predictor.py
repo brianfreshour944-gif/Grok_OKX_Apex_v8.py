@@ -59,7 +59,7 @@ class GQA_TransformerBlock(nn.Module):
 class GrokGQA_Transformer(nn.Module):
     def __init__(
         self, input_dim, seq_len=32,
-        embed_dim=128, num_layers=8, num_q_heads=16, num_kv_heads=4, dropout=0.1
+        embed_dim=128, num_layers=2, num_q_heads=16, num_kv_heads=4, dropout=0.1
     ):
         super().__init__()
         self.input_projection = nn.Linear(input_dim, embed_dim)
@@ -89,11 +89,9 @@ class GrokGQA_Transformer(nn.Module):
 
 class SafeMLPredictor:
     def __init__(
-        self, model_path,
-        seq_len=32,
-        input_dim=len(FEATURE_COLS),
-        embed_dim=128, num_layers=8, num_q_heads=16, num_kv_heads=4,
-        dropout=0.1
+        self, model_path="grok_gqa_v9_best.pth", input_dim=11, seq_len=32,
+        embed_dim=128, num_layers=2, num_q_heads=16, num_kv_heads=4,
+        dropout=0.0
     ):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

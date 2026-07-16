@@ -44,7 +44,7 @@ class SafeMLPredictor:
         self.seq_len = seq_len
         self.model   = GrokGQA_Transformer(
             input_dim=len(FEATURE_COLS), seq_len=seq_len,
-            embed_dim=128, num_layers=8, num_q_heads=16, num_kv_heads=4, dropout=0.1,
+            embed_dim=128, num_layers=2, num_q_heads=16, num_kv_heads=4, dropout=0.1,
         ).to(self.device)
         state = torch.load(model_path, map_location=self.device)
         self.model.load_state_dict(state, strict=False)
