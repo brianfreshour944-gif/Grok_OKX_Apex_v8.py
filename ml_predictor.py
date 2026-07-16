@@ -45,7 +45,7 @@ class GQA_TransformerBlock(nn.Module):
         k = k.repeat_interleave(self.num_q_heads // self.num_kv_heads, dim=1)
         v = v.repeat_interleave(self.num_q_heads // self.num_kv_heads, dim=1)
         
-        attn = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        attn = F.scaled_dot_product_attention(q, k, v)
         attn = attn.transpose(1, 2).contiguous().view(batch, seq, self.num_q_heads * self.head_dim)
         x = residual + self.dropout(self.out_proj(attn))
         

@@ -431,7 +431,7 @@ def train(
             tr_loss    += loss.item() * len(yb)
             # FIX: Raw logits threshold is 0.0 (which corresponds to probability 0.5)
             tr_correct += ((pred > 0.0) == yb.bool()).sum().item()
-        scheduler.step()
+            scheduler.step()
 
         # ── Validate ──
         model.eval()
