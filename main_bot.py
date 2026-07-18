@@ -180,8 +180,7 @@ async def run_trading_mode():
                     # FORCE LOG AT INFO LEVEL - this will appear 100%
                     logger.info(
                         f"🔬 TEST | Asset: {symbol} | ML Signal: {signal:.4f} | "
-                        f"Buy Threshold: {regime_params['buy_signal']:.2f} "
-                        f"(BUY_SIGNAL={BUY_SIGNAL}) | Trend: {trend}"
+                        f"Threshold: {BUY_SIGNAL} | Trend: {trend}"
                     )
                 except Exception as ml_error:
                     logger.error(f"💥 ML CRASH on {symbol}: {repr(ml_error)}")
@@ -232,7 +231,11 @@ async def run_trading_mode():
                     continue
 
                 # ── ENTRY ──────────────────────────────────────────────────────
-                if signal > regime_params["buy_signal"]:
+                # Single source of truth: BUY_SIGNAL (config). EMA50 trend filter
+                # (trend == "up") gates entries so we only buy with the wind at
+                # our back. trend is computed by compute_regime_and_trend() via
+                # close vs EMA-50.
+                if trend == "up" and signal > BUY_SIGNAL:
                     if not buys_allowed:
                         logger.info(f"🚫 BUY suppressed for {symbol} (cap/position limit)")
                         await asyncio.sleep(2)
