@@ -16,7 +16,7 @@ from config import (
     logger, BOT_NAME, SEQUENCE_LEN, MODEL_PATH,
     MAX_OPEN_POSITIONS, MAX_DRAWDOWN_STOP, MAX_HOLD_HOURS,
     BASE_RISK_PERCENT, MIN_POSITION_USD, MIN_ORDER_USD,
-    MIN_HOLD_HOURS_BEFORE_SIGNAL,
+    MIN_HOLD_HOURS_BEFORE_SIGNAL, BUY_SIGNAL,
     get_regime_params, fmt_price, trading_client, SYMBOLS,
 )
 from database import report_equity
@@ -173,7 +173,20 @@ async def run_trading_mode():
 
                 regime, trend, atr_pct = compute_regime_and_trend(df)
                 regime_params          = get_regime_params(regime)
-                signal                 = predictor.predict(df)
+
+                # ── DIAGNOSTIC ML PREDICTION BLOCK ────────────────────────────
+                try:
+                    signal = predictor.predict(df)
+                    # FORCE LOG AT INFO LEVEL - this will appear 100%
+                    logger.info(
+                        f"🔬 TEST | Asset: {symbol} | ML Signal: {signal:.4f} | "
+                        f"Buy Threshold: {regime_params['buy_signal']:.2f} "
+                        f"(BUY_SIGNAL={BUY_SIGNAL}) | Trend: {trend}"
+                    )
+                except Exception as ml_error:
+                    logger.error(f"💥 ML CRASH on {symbol}: {repr(ml_error)}")
+                    continue  # skip this asset and move to the next
+
                 price                  = df["close"].iloc[-1]
 
                 if price <= 0:
