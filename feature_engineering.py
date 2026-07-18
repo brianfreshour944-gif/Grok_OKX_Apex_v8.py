@@ -1,3 +1,16 @@
+<<<<<<< HEAD
+# feature_engineering.py - Microstructure feature set (lagging indicators removed)
+#
+# All lagging indicators (RSI / MACD / ATR / Bollinger) have been gutted and
+# replaced with order-flow / market-microstructure features derived from
+# OHLCV + VWAP + trade_count. These are computed from the raw bars the Alpaca
+# fetch block now returns (see trading_bot.py / train_transformer.py).
+#
+# NOTE: changing FEATURE_COLS changes the model input dimension. After updating
+# this file you MUST retrain the GQA Transformer and regenerate feature_scaler.pkl
+# in your Colab environment, otherwise the loaded input_projection weights will
+# not match (load_state_dict runs with strict=False and the layer stays random).
+=======
 # feature_engineering.py — Institutional-grade market microstructure features.
 #
 # Replaces retail indicators (RSI, MACD, bar shape ratios) with academically
@@ -22,10 +35,118 @@
 #   Garman & Klass (1980) — OHLC volatility estimation
 #   Kyle (1985)         — Continuous auction and insider trading (lambda)
 #   Amihud (2002)       — Illiquidity and stock returns
+>>>>>>> 3a94c752716523ad30fb7f42b4c5220848c8f39e
 
 import pandas as pd
 import numpy as np
 
+<<<<<<< HEAD
+# Feature columns consumed by the GQA Transformer, in exact order.
+FEATURE_COLS = [
+    'returns',           # 1-bar log return (short-term momentum)
+    'vwap_deviation',    # (close - vwap) / vwap  -> distance from fair value
+    'close_position',    # (close - low) / (high - low) -> buy/sell pressure in bar
+    'vol_acceleration',  # acceleration of volume flow (2nd diff of volume growth)
+    'volume_zscore',     # volume spike vs 20-bar rolling norm
+    'trade_count_accel', # acceleration of order-flow (trade_count growth)
+    'range_pct',         # (high - low) / close -> normalized bar range (volatility)
+    'trade_intensity',   # trade_count / volume -> avg trade size (whale vs retail)
+]
+
+# Neutral defaults used when a feature cannot be computed (short series / NaNs).
+FEATURE_DEFAULTS = {
+    'returns': 0.0,
+    'vwap_deviation': 0.0,
+    'close_position': 0.5,   # midpoint of the bar
+    'vol_acceleration': 0.0,
+    'volume_zscore': 0.0,
+    'trade_count_accel': 0.0,
+    'range_pct': 0.0,
+    'trade_intensity': 0.0,
+}
+
+
+def add_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calculates microstructure features from a DataFrame that must contain
+    'open', 'high', 'low', 'close', 'volume', 'vwap', 'trade_count'.
+
+    Returns a DataFrame containing exactly FEATURE_COLS, sanitized for the
+    GQA Transformer (no NaNs / infs).
+
+    Args:
+        df (pd.DataFrame): Input bars with OHLCV + vwap + trade_count.
+
+    Returns:
+        pd.DataFrame: DataFrame with added microstructure features, structured
+        exactly for the GQA Transformer.
+    """
+    if df is None or df.empty:
+        idx = df.index if df is not None else None
+        return pd.DataFrame(index=idx, columns=FEATURE_COLS).fillna(FEATURE_DEFAULTS)
+
+    df_copy = df.copy()  # Work on a copy to avoid SettingWithCopyWarning
+
+    # Ensure required columns are numeric and present
+    required = ['open', 'high', 'low', 'close', 'volume', 'vwap', 'trade_count']
+    for col in required:
+        if col not in df_copy.columns:
+            print(f"Warning: Missing critical column '{col}' for microstructure features.")
+            temp = pd.DataFrame(index=df.index, columns=FEATURE_COLS)
+            for f, default in FEATURE_DEFAULTS.items():
+                temp[f] = default
+            return temp
+        df_copy[col] = pd.to_numeric(df_copy[col], errors='coerce')
+
+    eps = 1e-9
+
+    # 1) Short-term momentum (log return is more stationary than pct_change)
+    df_copy['returns'] = np.log(df_copy['close'] / df_copy['close'].shift(1)).fillna(0.0)
+
+    # 2) VWAP deviation -> distance of price from fair value
+    vwap = df_copy['vwap'].replace(0, np.nan)
+    df_copy['vwap_deviation'] = ((df_copy['close'] - vwap) / vwap).fillna(0.0)
+
+    # 3) Close position within the bar (0 = at low, 1 = at high) -> pressure
+    rng = (df_copy['high'] - df_copy['low']).replace(0, np.nan)
+    df_copy['close_position'] = (
+        ((df_copy['close'] - df_copy['low']) / rng).fillna(0.5).clip(0, 1)
+    )
+
+    # 4) Volume acceleration: 2nd difference of the volume growth rate
+    vol_growth = df_copy['volume'].pct_change()
+    df_copy['vol_acceleration'] = vol_growth.diff().fillna(0.0)
+
+    # 5) Volume z-score vs 20-bar rolling norm (spike detection)
+    vol_mean = df_copy['volume'].rolling(20).mean()
+    vol_std = df_copy['volume'].rolling(20).std()
+    df_copy['volume_zscore'] = (
+        (df_copy['volume'] - vol_mean) / (vol_std + eps)
+    ).fillna(0.0)
+
+    # 6) Trade-count acceleration (order-flow acceleration)
+    tc_growth = df_copy['trade_count'].pct_change()
+    df_copy['trade_count_accel'] = tc_growth.diff().fillna(0.0)
+
+    # 7) Normalized bar range (volatility proxy)
+    close_safe = df_copy['close'].replace(0, np.nan)
+    df_copy['range_pct'] = (
+        (df_copy['high'] - df_copy['low']) / close_safe
+    ).fillna(0.0)
+
+    # 8) Trade intensity -> average trade size (whale vs retail footprint)
+    vol_safe = df_copy['volume'].replace(0, np.nan)
+    df_copy['trade_intensity'] = (df_copy['trade_count'] / vol_safe).fillna(0.0)
+
+    # Sanitize: clip extremes, fill any remaining NaNs with neutral defaults
+    for col in FEATURE_COLS:
+        df_copy[col] = df_copy[col].replace([np.inf, -np.inf], 0.0)
+        df_copy[col] = df_copy[col].fillna(FEATURE_DEFAULTS.get(col, 0.0))
+        df_copy[col] = df_copy[col].clip(-1e6, 1e6)
+
+    # Guarantee exact column ordering matches the training matrix
+    return df_copy[FEATURE_COLS]
+=======
 # ── Feature columns ───────────────────────────────────────────────────────────
 # NOTE: This list is exactly 11 features — input_dim=11 in ml_predictor.py and
 # train_transformer.py is unchanged.  Update this list only if you also retrain
@@ -249,3 +370,4 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
         d[col] = _sanitize(d[col], fill=FEATURE_DEFAULTS.get(col, 0.0))
 
     return d[FEATURE_COLS]
+>>>>>>> 3a94c752716523ad30fb7f42b4c5220848c8f39e
