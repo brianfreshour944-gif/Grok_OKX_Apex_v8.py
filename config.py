@@ -53,10 +53,16 @@ SEQUENCE_LEN = 32
 MODEL_PATH   = "grok_gqa_v9_best.pth"
 
 # ── Regime-adaptive thresholds ─────────────────────────────────────────────────
+# NOTE: buy/sell signals are anchored to BUY_SIGNAL / SELL_SIGNAL so that
+# lowering BUY_SIGNAL (e.g. 0.62 -> 0.51 for diagnostics) takes effect in
+# EVERY regime, not just "normal". Original relative offsets preserved:
+#   quiet = BUY_SIGNAL - 0.04  (more eager in low-vol markets)
+#   wild  = BUY_SIGNAL + 0.06  (more conservative in high-vol markets)
+#   quiet sell = SELL_SIGNAL + 0.02, wild sell = SELL_SIGNAL - 0.03
 REGIME_PARAMS = {
     "wild": {
-        "buy_signal":        0.68,
-        "sell_signal":       0.42,
+        "buy_signal":        BUY_SIGNAL + 0.06,
+        "sell_signal":       SELL_SIGNAL - 0.03,
         "profit_target_pct": 0.03,
         "stop_loss_pct":     0.045,
     },
@@ -67,8 +73,8 @@ REGIME_PARAMS = {
         "stop_loss_pct":     STOP_LOSS_PCT,
     },
     "quiet": {
-        "buy_signal":        0.58,
-        "sell_signal":       0.47,
+        "buy_signal":        BUY_SIGNAL - 0.04,
+        "sell_signal":       SELL_SIGNAL + 0.02,
         "profit_target_pct": 0.015,
         "stop_loss_pct":     0.02,
     },

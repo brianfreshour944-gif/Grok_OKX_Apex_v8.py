@@ -4,7 +4,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 
 from alpaca.data.requests import CryptoBarsRequest
-from alpaca.data.timeframe import TimeFrame
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 from config import logger, data_client, SEQUENCE_LEN
 
@@ -55,21 +55,23 @@ async def scan_stable_assets(limit_scope: int = 35) -> list:
 
 async def get_clean_ohlcv_dataframe(symbol):
     """
-    Fetches the last 600 1-minute bars from Alpaca, resamples to 5-minute,
-    strips zero-price candles, and returns the last SEQUENCE_LEN rows.
+    Fetches native 15-MINUTE bars from Alpaca and returns the last SEQUENCE_LEN.
+
+    CRITICAL: This MUST match train_transformer.py's BAR_TIMEFRAME
+    (TimeFrame(15, TimeFrameUnit.Minute)). The transformer was trained on
+    15-min bar statistics — feeding it resampled 5-min bars (the old 1-min→5-min
+    resample) puts every feature out-of-distribution and collapses the model
+    output toward ~0.5 for ALL assets (no trades ever fire). Native 15-min bars
+    also have server-side VWAP already volume-weighted over the real window.
 
     Columns returned: open, high, low, close, volume, vwap, trade_count
-      - vwap: volume-weighted average price for each 5-min bar
-              (computed as sum(vwap*volume) / sum(volume) across constituent 1-min bars)
-      - trade_count: total number of trades in each 5-min bar
-
     Returns None if data is insufficient.
     """
     try:
         req  = CryptoBarsRequest(
             symbol_or_symbols=symbol,
-            timeframe=TimeFrame.Minute,
-            limit=600
+            timeframe=TimeFrame(15, TimeFrameUnit.Minute),
+            limit=600,
         )
         bars = data_client.get_crypto_bars(req).data.get(symbol, [])
         if len(bars) < SEQUENCE_LEN:
@@ -90,33 +92,14 @@ async def get_clean_ohlcv_dataframe(symbol):
         if df.index.tz is not None:
             df.index = df.index.tz_localize(None)
 
-        # ── Resample to 5-minute bars ──────────────────────────────────────────
-        # vwap must be resampled as a weighted average (sum(vwap*vol)/sum(vol)),
-        # not a simple mean — a plain mean of VWAPs is mathematically wrong.
-        # We compute the dollar-volume numerator as a helper column, then divide.
-        df["vwap_x_vol"] = df["vwap"] * df["volume"]
+        # Where Alpaca returned vwap=0 (rare empty bars), fall back to close
+        df["vwap"] = df["vwap"].where(df["vwap"] > 0, df["close"])
 
-        df_5m = df.resample("5min").agg({
-            "open":        "first",
-            "high":        "max",
-            "low":         "min",
-            "close":       "last",
-            "volume":      "sum",
-            "vwap_x_vol":  "sum",
-            "trade_count": "sum",
-        }).fillna(0)
-
-        # Reconstruct VWAP: (sum of vwap*vol) / (sum of vol), avoid div-by-zero
-        df_5m["vwap"] = (
-            df_5m["vwap_x_vol"] / df_5m["volume"].replace(0, float("nan"))
-        ).fillna(df_5m["close"])   # fall back to close price when no volume
-        df_5m.drop(columns=["vwap_x_vol"], inplace=True)
-
-        df_5m = df_5m[df_5m["close"] > 0]   # drop zero-price candles
-        if len(df_5m) < SEQUENCE_LEN:
+        df = df[df["close"] > 0]   # drop zero-price candles
+        if len(df) < SEQUENCE_LEN:
             return None
 
-        return df_5m.tail(SEQUENCE_LEN)
+        return df.tail(SEQUENCE_LEN)
 
     except Exception as e:
         logger.error(f"Data fetch error {symbol}: {e}")
