@@ -65,10 +65,21 @@ class SafeMLPredictor:
                 data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
             x = torch.tensor(data).unsqueeze(0).to(self.device)
             with torch.no_grad():
-                return float(self.model(x).item())
+                raw_logit = self.model(x)
+                # BUGFIX: GrokGQA_Transformer.forward() returns RAW LOGITS
+                # (see ml_predictor.py comment "raw logits, no sigmoid"). This
+                # method was returning the raw logit directly and comparing it
+                # against probability-scale thresholds (buy_signal=0.58-0.68,
+                # sell_signal=0.42-0.47) in main_bot.py — a logit is centered
+                # around 0 (typical range ~-3..+3), so it would almost NEVER
+                # cross a 0.6+ threshold. This is why the bot found 18 assets
+                # every cycle but bought exactly zero of them, permanently.
+                prob = torch.sigmoid(raw_logit).item()
+                return float(prob)
         except Exception as e:
             logger.error(f"Prediction error: {e}", exc_info=True)
             return 0.5
+
 
 
 predictor = SafeMLPredictor(MODEL_PATH, SEQUENCE_LEN)

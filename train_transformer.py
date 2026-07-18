@@ -141,117 +141,6 @@ def fetch_bars(
     VWAP is provided by Alpaca and is already volume-weighted over the 15-min window.
     """
     try:
-<<<<<<< HEAD
-        with psycopg2.connect(db_url) as conn:
-            with conn.cursor() as cur:
-                if not _equity_schema_ready:
-                    cur.execute("ALTER TABLE bot_status ADD COLUMN IF NOT EXISTS starting_equity NUMERIC")
-                    cur.execute("ALTER TABLE bot_status ADD COLUMN IF NOT EXISTS live_equity NUMERIC")
-                    cur.execute("ALTER TABLE bot_status ADD COLUMN IF NOT EXISTS live_equity_updated_at TIMESTAMP")
-                    _equity_schema_ready = True
-                cur.execute("""
-                    INSERT INTO bot_status (bot_name, starting_equity, live_equity, live_equity_updated_at, last_update)
-                    VALUES (%s, %s, %s, NOW(), NOW())
-                    ON CONFLICT (bot_name) DO UPDATE
-                    SET live_equity = EXCLUDED.live_equity,
-                        live_equity_updated_at = NOW(),
-                        last_update = NOW(),
-                        starting_equity = COALESCE(bot_status.starting_equity, EXCLUDED.starting_equity)
-                """, (bot_name, float(current_equity), float(current_equity)))
-                conn.commit()
-    except Exception as e:
-        logger.error(f"report_equity DB Error: {e}")
-
-def normalize_symbol(symbol):
-    return symbol.replace("-", "/")
-
-def get_buying_power():
-    try:
-        acc = trading_client.get_account()
-        return float(acc.non_marginable_buying_power)
-    except Exception as e:
-        logger.error(f"Error fetching buying power: {e}")
-        return 0.0
-
-# ========================= FEATURE ENG =========================
-# Centralized microstructure feature engineering (lagging indicators removed).
-# Delegates to feature_engineering.add_features so training and inference share
-# the exact same feature math. Guarantees vwap / trade_count exist.
-def safe_add_features(df: pd.DataFrame) -> pd.DataFrame:
-    from feature_engineering import add_features as _add_features
-    df = df.copy()
-    for col in ['open', 'high', 'low', 'close', 'volume']:
-        if col not in df.columns:
-            df[col] = 0.0
-        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
-    for col in ['vwap', 'trade_count']:
-        if col not in df.columns:
-            df[col] = 0.0
-        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
-    return _add_features(df)
-
-# ========================= MODEL WRAPPER =========================
-
-class SafeMLPredictor:
-    def __init__(self, model_path, seq_len=32):
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.seq_len = seq_len
-        try:
-            self.model = GrokGQA_Transformer(
-                input_dim=len(FEATURE_COLS), seq_len=seq_len,
-                embed_dim=128, num_layers=8, num_q_heads=16, num_kv_heads=4, dropout=0.1
-            ).to(self.device)
-            state = torch.load(model_path, map_location=self.device)
-            self.model.load_state_dict(state, strict=False)
-            self.model.eval()
-
-            scaler_path = os.path.join(os.path.dirname(model_path), "feature_scaler.pkl")
-            self.scaler = joblib.load(scaler_path) if os.path.exists(scaler_path) else None
-            logger.info(f"✅ Model loaded on {self.device}")
-        except Exception as e:
-            logger.error(f"❌ Model Init Error: {e}")
-            raise
-
-    def predict(self, df):
-        try:
-            feat_df = safe_add_features(df)
-            data = feat_df.tail(self.seq_len).values.astype(np.float32)
-            if len(data) < self.seq_len:
-                return 0.5
-            data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
-            if self.scaler:
-                data = self.scaler.transform(data)
-            x = torch.tensor(data).unsqueeze(0).to(self.device)
-            with torch.no_grad():
-                return float(self.model(x).item())
-        except Exception as e:
-            logger.error(f"Prediction error: {e}")
-            return 0.5
-
-predictor = SafeMLPredictor(MODEL_PATH, SEQUENCE_LEN)
-
-# ========================= CORE LOGIC =========================
-
-async def get_clean_ohlcv(symbol):
-    try:
-        req = CryptoBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Minute, limit=200)
-        bars = data_client.get_crypto_bars(req).data.get(symbol, [])
-        if not bars:
-            return None
-        df = pd.DataFrame([{
-            "timestamp": b.timestamp,
-            "open": float(b.open or 0), "high": float(b.high or 0),
-            "low": float(b.low or 0), "close": float(b.close or 0),
-            "volume": float(b.volume or 0),
-            "vwap": float(getattr(b, "vwap", 0) or 0),
-            "trade_count": float(getattr(b, "trade_count", 0) or 0)
-        } for b in bars])
-        df.set_index("timestamp", inplace=True)
-        df = df.resample("5min").agg({
-            "open": "first", "high": "max", "low": "min", "close": "last",
-            "volume": "sum", "vwap": "last", "trade_count": "sum"
-        }).fillna(0)
-=======
         start = datetime.now(tz=timezone.utc) - timedelta(days=days)
         req = CryptoBarsRequest(
             symbol_or_symbols=symbol,
@@ -284,7 +173,6 @@ async def get_clean_ohlcv(symbol):
 
         df = df[df["close"] > 0]
         log.info(f"  {symbol}: {len(df):,} 15-min bars fetched")
->>>>>>> 3a94c752716523ad30fb7f42b4c5220848c8f39e
         return df
 
     except Exception as exc:
@@ -302,7 +190,7 @@ def build_arrays(
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     For each symbol:
-      1. Fetch 5-min bars
+      1. Fetch 15-min bars
       2. Compute features via add_features()
       3. Compute labels from RAW close prices (NOT from add_features output)
       4. Slice into (X, y) windows with correct chronological alignment
@@ -516,7 +404,7 @@ def train(
 
     criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=WEIGHT_DECAY)
-    
+
     # FIX: Use OneCycleLR for proper learning rate warmup
     steps_per_epoch = len(train_loader)
     scheduler = optim.lr_scheduler.OneCycleLR(
