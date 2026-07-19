@@ -7,3 +7,4 @@ alpaca-py==0.33.0
 gymnasium
 psycopg2-binary
 sqlalchemy
+pytz
