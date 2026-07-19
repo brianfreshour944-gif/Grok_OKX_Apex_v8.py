@@ -94,8 +94,9 @@ def is_closed_candle(current_time, interval_minutes=5):
     minute = current_time.minute
     second = current_time.second
     # 5-minute candles close at :00, :05, :10...
-    # Allow trading at 2 seconds past the close to ensure API data is finalized
-    if minute % interval_minutes == 0 and second >= 2:
+    # Allow trading at 2 seconds past the close to ensure API data is finalized.
+    # Restrict to the first 30 seconds so it doesn't double-fire if the loop finishes quickly.
+    if minute % interval_minutes == 0 and 2 <= second <= 30:
         return True
     return False
 
