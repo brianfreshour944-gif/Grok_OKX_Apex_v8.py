@@ -1,7 +1,7 @@
 # data_feeds.py — Alpaca market data: asset scanner + OHLCV+VWAP fetcher.
 
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from alpaca.data.requests import CryptoBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
@@ -74,6 +74,11 @@ async def get_clean_ohlcv_dataframe(symbol):
             limit=600,
         )
         bars = data_client.get_crypto_bars(req).data.get(symbol, [])
+        
+        # Ensure we only trade on finalized data by filtering out the current incomplete minute
+        current_minute = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        bars = [b for b in bars if b.timestamp < current_minute]
+        
         if len(bars) < SEQUENCE_LEN:
             return None
 

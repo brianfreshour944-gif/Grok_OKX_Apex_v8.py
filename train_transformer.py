@@ -372,6 +372,9 @@ def train(
     scaler = StandardScaler()
     # Flatten to (n_samples × seq_len, n_features) for fit, then unflatten
     scaler.fit(X_tr.reshape(-1, n_feat))
+    
+    # Log scaler means to verify it's fitting on Z-scored features (~0) and not raw OHLCV prices (~66000)
+    log.info(f"  Scaler means (should be ~0): {scaler.mean_[:4]}")
 
     X_tr_s = scaler.transform(X_tr.reshape(-1, n_feat)).reshape(n_tr, seq_len, n_feat).astype(np.float32)
     X_va_s = scaler.transform(X_va.reshape(-1, n_feat)).reshape(n_va, seq_len, n_feat).astype(np.float32)
