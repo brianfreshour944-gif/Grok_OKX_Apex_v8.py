@@ -85,6 +85,20 @@ class SafeMLPredictor:
 predictor = SafeMLPredictor(MODEL_PATH, SEQUENCE_LEN)
 
 
+from datetime import datetime as dt
+import time
+# ... (existing imports)
+
+def is_closed_candle(current_time, interval_minutes=5):
+    """Return True only if the current time is strictly past the 5-min close."""
+    minute = current_time.minute
+    second = current_time.second
+    # 5-minute candles close at :00, :05, :10...
+    # Allow trading at 2 seconds past the close to ensure API data is finalized
+    if minute % interval_minutes == 0 and second >= 2:
+        return True
+    return False
+
 # ── Main trading loop ──────────────────────────────────────────────────────────
 async def run_trading_mode():
     global start_equity
@@ -120,6 +134,12 @@ async def run_trading_mode():
 
     while True:
         try:
+            current_dt = dt.now()
+            if not is_closed_candle(current_dt):
+                logger.info(f"⏳ Waiting for candle close. Current time: {current_dt.strftime('%H:%M:%S')}. Skipping prediction.")
+                await asyncio.sleep(10)
+                continue
+
             account      = trading_client.get_account()
             equity       = float(account.equity)
             if start_equity is None:
