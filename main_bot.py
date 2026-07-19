@@ -301,9 +301,12 @@ async def run_trading_mode():
                             logger.info("🔒 Max positions reached — no more buys this cycle.")
                             buys_allowed = False
 
-                await asyncio.sleep(2)
+                import sys
+                if "--once" in sys.argv:
+                    logger.info("🏁 --once flag passed. Cycle complete. Exiting.")
+                    break
 
-            await asyncio.sleep(40)
+                await asyncio.sleep(40)
 
         except Exception as e:
             logger.error(f"Critical loop error: {e}")
