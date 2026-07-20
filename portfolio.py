@@ -115,3 +115,62 @@ def sync_existing_positions(entry_time: dict) -> None:
                     f"avg_entry=${data['avg_entry']:.4f}"
                 )
                 break
+
+
+def swap_weakest_position(new_symbol: str, new_signal: float, latest_signals: dict, threshold: float = 0.05) -> bool:
+    """
+    Evaluates currently open positions. If there's a held position with a signal significantly 
+    weaker than the new_signal, it force-sells that position to free up capital and returns True.
+    """
+    try:
+        positions = get_all_positions()
+        if not positions:
+            return False
+
+        weakest_sym = None
+        weakest_signal = float('inf')
+        weakest_qty = 0.0
+        weakest_price = 0.0
+
+        for alpaca_sym, p_data in positions.items():
+            # Reverse map from alpaca_sym to standard symbol
+            held_sym = next((s for s in SYMBOLS if normalize_symbol(s) == alpaca_sym), None)
+            if not held_sym:
+                continue
+
+            # Fallback to 0.5 if we don't have a recent signal for the held asset
+            held_signal = latest_signals.get(held_sym, 0.5)
+
+            if held_signal < weakest_signal:
+                weakest_signal = held_signal
+                weakest_sym = alpaca_sym
+                weakest_qty = p_data['qty']
+                weakest_price = p_data['current_price']
+
+        if weakest_sym and (new_signal - weakest_signal) >= threshold:
+            logger.warning(
+                f"🔄 SWAP TRIGGERED: Selling {weakest_sym} (signal {weakest_signal:.4f}) "
+                f"to make room for {new_symbol} (signal {new_signal:.4f})"
+            )
+            
+            # Execute limit sell for the weakest asset
+            try:
+                from alpaca.trading.requests import LimitOrderRequest
+                trading_client.submit_order(
+                    order_data=LimitOrderRequest(
+                        symbol=weakest_sym,
+                        qty=float(weakest_qty),
+                        side=OrderSide.SELL,
+                        time_in_force=TimeInForce.GTC,
+                        limit_price=float(weakest_price)
+                    )
+                )
+                return True
+            except Exception as e:
+                logger.error(f"Failed to execute swap sell for {weakest_sym}: {e}")
+                return False
+
+    except Exception as e:
+        logger.error(f"swap_weakest_position failed: {e}")
+        
+    return False

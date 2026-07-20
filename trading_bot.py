@@ -84,6 +84,7 @@ data_client = CryptoHistoricalDataClient()
 
 cooldown_until = {symbol: 0.0 for symbol in SYMBOLS}
 entry_time     = {}   # symbol -> timestamp, tracks how long a position has been held
+latest_signals = {}
 start_equity   = None
 
 # --- Track sell retry attempts to prevent spam ---
@@ -183,8 +184,20 @@ def compute_regime_and_trend(df: pd.DataFrame):
         atr     = tr.rolling(14).mean().iloc[-1]
         price   = df['close'].iloc[-1]
         atr_pct = (atr / price) * 100 if price > 0 else 0.0
-        ema50   = df['close'].ewm(span=50).mean().iloc[-1]
-        trend   = "up" if price > ema50 else "down"
+        
+        # Volatility-Adjusted Moving Average (VAMA)
+        base_span = 50
+        baseline_vol = 1.5
+        
+        if atr_pct > 0:
+            vol_ratio = atr_pct / baseline_vol
+            vol_ratio = max(0.5, min(vol_ratio, 5.0))
+            dynamic_span = max(10, int(base_span / vol_ratio))
+        else:
+            dynamic_span = base_span
+            
+        adaptive_ma   = df['close'].ewm(span=dynamic_span).mean().iloc[-1]
+        trend   = "up" if price > adaptive_ma else "down"
         regime  = "wild" if atr_pct > 4.0 else "normal" if atr_pct > 2.0 else "quiet"
         return regime, trend, round(atr_pct, 2)
     except Exception:
@@ -312,6 +325,59 @@ def sell_largest_position():
     except Exception as e:
         logger.error(f"sell_largest_position failed: {e}")
 
+def swap_weakest_position(new_symbol: str, new_signal: float, latest_signals: dict, threshold: float = 0.05) -> bool:
+    """
+    Evaluates currently open positions. If there's a held position with a signal significantly 
+    weaker than the new_signal, it force-sells that position to free up capital and returns True.
+    """
+    try:
+        positions = get_all_positions()
+        if not positions:
+            return False
+
+        weakest_sym = None
+        weakest_signal = float('inf')
+        weakest_qty = 0.0
+        weakest_price = 0.0
+
+        for alpaca_sym, p_data in positions.items():
+            held_sym = next((s for s in SYMBOLS if normalize_symbol(s) == alpaca_sym), None)
+            if not held_sym:
+                continue
+
+            held_signal = latest_signals.get(held_sym, 0.5)
+
+            if held_signal < weakest_signal:
+                weakest_signal = held_signal
+                weakest_sym = alpaca_sym
+                weakest_qty = p_data['qty']
+                weakest_price = p_data['current_price']
+
+        if weakest_sym and (new_signal - weakest_signal) >= threshold:
+            logger.warning(
+                f"🔄 SWAP TRIGGERED: Selling {weakest_sym} (signal {weakest_signal:.4f}) "
+                f"to make room for {new_symbol} (signal {new_signal:.4f})"
+            )
+            
+            try:
+                trading_client.submit_order(
+                    order_data=LimitOrderRequest(
+                        symbol=weakest_sym,
+                        qty=float(weakest_qty),
+                        side=OrderSide.SELL,
+                        time_in_force=TimeInForce.GTC,
+                        limit_price=float(weakest_price)
+                    )
+                )
+                return True
+            except Exception as e:
+                logger.error(f"Failed to execute swap sell for {weakest_sym}: {e}")
+                return False
+
+    except Exception as e:
+        logger.error(f"swap_weakest_position failed: {e}")
+        
+    return False
 
 # ========================= STARTUP SYNC =========================
 def sync_existing_positions():
@@ -407,19 +473,28 @@ async def run_trading_mode():
                     f"Holding off on buys.")
                 buys_allowed = False
 
-            for symbol in SYMBOLS:
-                now        = time.time()
+            now = time.time()
+            symbols_to_process = []
+            for sym in SYMBOLS:
+                cooldown_until.setdefault(sym, 0.0)
+                if now >= cooldown_until.get(sym, 0):
+                    symbols_to_process.append(sym)
+
+            # PARALLEL FETCH: Fetch all OHLCV dataframes concurrently
+            fetch_tasks = [get_clean_ohlcv_dataframe(sym) for sym in symbols_to_process]
+            dfs = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+
+            for symbol, df in zip(symbols_to_process, dfs):
+                if df is None or isinstance(df, Exception):
+                    if isinstance(df, Exception):
+                        logger.error(f"Failed to fetch data for {symbol}: {df}")
+                    continue
+
                 alpaca_sym = normalize_symbol(symbol)
-
-                if now < cooldown_until.get(symbol, 0):
-                    continue
-
-                df = await get_clean_ohlcv_dataframe(symbol)
-                if df is None:
-                    continue
 
                 regime, trend, atr_pct = compute_regime_and_trend(df)
                 signal = predictor.predict(df)
+                latest_signals[symbol] = signal
                 price  = df["close"].iloc[-1]
 
                 # --- STEP 1 DIAGNOSTIC: always-visible (INFO level) proof that
@@ -492,11 +567,20 @@ async def run_trading_mode():
                 if signal > BUY_SIGNAL:
 
                     if not buys_allowed:
-                        logger.info(f"🚫 BUY suppressed for {symbol} (cap/position limit)")
-                        await asyncio.sleep(2)
-                        continue
+                        if swap_weakest_position(symbol, signal, latest_signals):
+                            logger.info(f"✅ Swapped weak position to make room for {symbol}. Proceeding with buy.")
+                            buys_allowed = True
+                            open_count = max(0, open_count - 1)
+                        else:
+                            logger.info(f"🚫 BUY suppressed for {symbol} (cap/position limit and no weak swap found)")
+                            await asyncio.sleep(2)
+                            continue
 
-                    risk_usd = equity * BASE_RISK_PERCENT
+                    # Dynamic Position Sizing based on ML signal strength
+                    # Base multiplier is 1.0, scales up to 2.0 as signal approaches 1.0
+                    signal_strength_multiplier = 1.0 + max(0, (signal - BUY_SIGNAL) / (1.0 - BUY_SIGNAL))
+                    
+                    risk_usd = equity * BASE_RISK_PERCENT * signal_strength_multiplier
                     qty      = risk_usd / price
                     if qty * price > MAX_SINGLE_TRADE_USD:
                         qty = MAX_SINGLE_TRADE_USD / price

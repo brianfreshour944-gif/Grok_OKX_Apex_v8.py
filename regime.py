@@ -28,9 +28,24 @@ def compute_regime_and_trend(df: pd.DataFrame):
         atr     = tr.rolling(14).mean().iloc[-1]
         price   = close.iloc[-1]
         atr_pct = (atr / price) * 100 if price > 0 else 0.0
-        ema50   = close.ewm(span=50).mean().iloc[-1]
 
-        trend  = "up"    if price > ema50  else "down"
+        # Volatility-Adjusted Moving Average (VAMA)
+        # We adapt the EMA window length dynamically. Base span is 50.
+        # High volatility = shorter span (fast reaction to breakouts)
+        # Low volatility  = longer span (avoids whipsaw in sideways markets)
+        base_span = 50
+        baseline_vol = 1.5  # Typical crypto ATR% 
+        
+        if atr_pct > 0:
+            vol_ratio = atr_pct / baseline_vol
+            vol_ratio = max(0.5, min(vol_ratio, 5.0))  # Clamp between 0.5x and 5.0x
+            dynamic_span = max(10, int(base_span / vol_ratio))
+        else:
+            dynamic_span = base_span
+            
+        adaptive_ma = close.ewm(span=dynamic_span).mean().iloc[-1]
+        
+        trend  = "up"    if price > adaptive_ma else "down"
         regime = "wild"  if atr_pct > 4.0 else "normal" if atr_pct > 2.0 else "quiet"
         return regime, trend, round(atr_pct, 2)
 

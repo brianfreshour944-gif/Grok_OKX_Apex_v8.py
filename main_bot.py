@@ -25,6 +25,7 @@ from regime import compute_regime_and_trend, calculate_adjusted_risk
 from portfolio import (
     get_all_positions, get_buying_power,
     sell_largest_position, sync_existing_positions, normalize_symbol,
+    swap_weakest_position,
 )
 from orders import place_order
 from feature_engineering import add_features, FEATURE_COLS
@@ -34,6 +35,7 @@ import joblib
 # ── Global state ───────────────────────────────────────────────────────────────
 cooldown_until: dict = {symbol: 0.0 for symbol in SYMBOLS}
 entry_time:     dict = {}
+latest_signals: dict = {}
 start_equity         = None
 
 import json
@@ -198,19 +200,25 @@ async def run_trading_mode():
                 buys_allowed = False
 
             active_symbols = await scan_stable_assets(limit_scope=18)
+            now = time.time()
+            
+            symbols_to_process = []
             for sym in active_symbols:
                 cooldown_until.setdefault(sym, 0.0)
+                if now >= cooldown_until.get(sym, 0):
+                    symbols_to_process.append(sym)
 
-            for symbol in active_symbols:
-                now        = time.time()
+            # PARALLEL FETCH: Fetch all OHLCV dataframes concurrently
+            fetch_tasks = [get_clean_ohlcv_dataframe(sym) for sym in symbols_to_process]
+            dfs = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+
+            for symbol, df in zip(symbols_to_process, dfs):
+                if df is None or isinstance(df, Exception):
+                    if isinstance(df, Exception):
+                        logger.error(f"Failed to fetch data for {symbol}: {df}")
+                    continue
+
                 alpaca_sym = normalize_symbol(symbol)
-
-                if now < cooldown_until.get(symbol, 0):
-                    continue
-
-                df = await get_clean_ohlcv_dataframe(symbol)
-                if df is None:
-                    continue
 
                 regime = compute_regime_and_trend(df)[0] # we still get the native regime/trend
                 regime_params          = get_regime_params(regime)
@@ -228,6 +236,7 @@ async def run_trading_mode():
                 # ── DIAGNOSTIC ML PREDICTION BLOCK ────────────────────────────
                 try:
                     signal = predictor.predict(df)
+                    latest_signals[symbol] = signal
                     # FORCE LOG AT INFO LEVEL - this will appear 100%
                     logger.info(
                         f"🔬 TEST | Asset: {symbol} | ML Signal: {signal:.4f} | "
@@ -288,11 +297,20 @@ async def run_trading_mode():
                 # close vs EMA-50.
                 if trend == "up" and signal > BUY_SIGNAL:
                     if not buys_allowed:
-                        logger.info(f"🚫 BUY suppressed for {symbol} (cap/position limit)")
-                        await asyncio.sleep(2)
-                        continue
+                        if swap_weakest_position(symbol, signal, latest_signals):
+                            logger.info(f"✅ Swapped weak position to make room for {symbol}. Proceeding with buy.")
+                            buys_allowed = True
+                            open_count = max(0, open_count - 1)
+                        else:
+                            logger.info(f"🚫 BUY suppressed for {symbol} (cap/position limit and no weak swap found)")
+                            await asyncio.sleep(2)
+                            continue
 
-                    adjusted_risk = calculate_adjusted_risk(equity, atr_pct) * position_size_multiplier
+                    # Dynamic Position Sizing based on ML signal strength
+                    # Base multiplier is 1.0, scales up to 2.0 as signal approaches 1.0
+                    signal_strength_multiplier = 1.0 + max(0, (signal - BUY_SIGNAL) / (1.0 - BUY_SIGNAL))
+                    
+                    adjusted_risk = calculate_adjusted_risk(equity, atr_pct) * position_size_multiplier * signal_strength_multiplier
                     qty           = adjusted_risk / price
                     trade_value   = qty * price
 
@@ -336,7 +354,8 @@ async def run_trading_mode():
                     logger.info("🏁 --once flag passed. Cycle complete. Exiting.")
                     break
 
-                await asyncio.sleep(40)
+            # Sleep once per entire cycle, not once per asset
+            await asyncio.sleep(40)
 
         except Exception as e:
             logger.error(f"Critical loop error: {e}")
