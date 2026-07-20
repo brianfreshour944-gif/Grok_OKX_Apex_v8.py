@@ -2,7 +2,7 @@
 
 import time
 
-from alpaca.trading.requests import MarketOrderRequest
+from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 
 from config import (
@@ -77,11 +77,12 @@ def sell_largest_position() -> None:
         )
         try:
             trading_client.submit_order(
-                order_data=MarketOrderRequest(
+                order_data=LimitOrderRequest(
                     symbol=largest.symbol,
                     qty=float(largest.qty),
                     side=OrderSide.SELL,
                     time_in_force=TimeInForce.GTC,
+                    limit_price=float(largest.current_price)
                 )
             )
             sell_retry_cooldown.pop(largest.symbol, None)

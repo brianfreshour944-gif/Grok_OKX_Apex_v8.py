@@ -26,9 +26,7 @@ BOT_NAME = os.getenv("BOT_NAME", "Grok_Alpaca_Apex_v9_CuttingEdge")
 
 # ── Universe ───────────────────────────────────────────────────────────────────
 SYMBOLS = [
-    "BTC/USD", "ETH/USD", "SOL/USD", "DOGE/USD", "LTC/USD", "BCH/USD",
-    "LINK/USD", "UNI/USD", "AVAX/USD", "DOT/USD", "AAVE/USD", "ADA/USD",
-    "SHIB/USD", "ATOM/USD", "GRT/USD", "MKR/USD", "COMP/USD", "NEAR/USD",
+    "BTC/USD", "ETH/USD", "SOL/USD"
 ]
 
 # ── Risk / sizing ──────────────────────────────────────────────────────────────

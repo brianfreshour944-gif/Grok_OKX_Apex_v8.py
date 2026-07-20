@@ -36,7 +36,27 @@ cooldown_until: dict = {symbol: 0.0 for symbol in SYMBOLS}
 entry_time:     dict = {}
 start_equity         = None
 
+import json
 
+def read_regime_flag():
+    """Read the regime flag file. Returns a dict with pause flags."""
+    default = {
+        "pause_grok": False,
+        "pause_oracle": False,
+        "grok_multiplier": 1.0,
+        "oracle_multiplier": 1.0,
+        "regime": "normal"
+    }
+    # Path should point to where regime_switch.py runs and writes the file.
+    # We will assume it's C:/Users/brian/OneDrive/Documents/Static-Repo-okx-bot/regime_flag.txt
+    # or just "regime_flag.txt" if running in the same directory.
+    # The user says "in your main directory (where both bots can access it)".
+    try:
+        with open(r"C:\Users\brian\OneDrive\Documents\Static-Repo-okx-bot\regime_flag.txt", "r") as f:
+            data = json.load(f)
+            return data
+    except (FileNotFoundError, json.JSONDecodeError):
+        return default
 # ── ML predictor (inline, tightly coupled to main loop state) ─────────────────
 class SafeMLPredictor:
     def __init__(self, model_path, seq_len=32):
@@ -192,8 +212,18 @@ async def run_trading_mode():
                 if df is None:
                     continue
 
-                regime, trend, atr_pct = compute_regime_and_trend(df)
+                regime = compute_regime_and_trend(df)[0] # we still get the native regime/trend
                 regime_params          = get_regime_params(regime)
+                trend                  = compute_regime_and_trend(df)[1]
+                atr_pct                = compute_regime_and_trend(df)[2]
+
+                # ── REGIME SWITCH CHECK ───────────────────────────────────────
+                regime_flag = read_regime_flag()
+                if regime_flag.get("pause_grok", False):
+                    logger.info("⏸️ Grok paused by Regime Switch (Volatile market). Skipping cycle.")
+                    continue  # Skip the entire cycle
+                    
+                position_size_multiplier = regime_flag.get("grok_multiplier", 1.0)
 
                 # ── DIAGNOSTIC ML PREDICTION BLOCK ────────────────────────────
                 try:
@@ -262,7 +292,7 @@ async def run_trading_mode():
                         await asyncio.sleep(2)
                         continue
 
-                    adjusted_risk = calculate_adjusted_risk(equity, atr_pct)
+                    adjusted_risk = calculate_adjusted_risk(equity, atr_pct) * position_size_multiplier
                     qty           = adjusted_risk / price
                     trade_value   = qty * price
 

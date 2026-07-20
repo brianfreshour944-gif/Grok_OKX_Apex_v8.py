@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest
+from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.data.historical import CryptoHistoricalDataClient
 from alpaca.data.requests import CryptoBarsRequest
@@ -296,9 +296,10 @@ def sell_largest_position():
         
         try:
             trading_client.submit_order(
-                order_data=MarketOrderRequest(
+                order_data=LimitOrderRequest(
                     symbol=largest.symbol, qty=float(largest.qty),
-                    side=OrderSide.SELL, time_in_force=TimeInForce.GTC
+                    side=OrderSide.SELL, time_in_force=TimeInForce.GTC,
+                    limit_price=float(largest.current_price)
                 )
             )
             # Clear cooldown on successful submit
@@ -559,17 +560,28 @@ async def run_trading_mode():
 
 async def place_order(symbol, side, qty, price=None):
     """FIXED: now passes price and order.id into record_trade instead of None."""
+    import math
     try:
-        order = trading_client.submit_order(
-            order_data=MarketOrderRequest(
+        if side == OrderSide.SELL:
+            qty = math.floor(qty * 1e8) / 1e8
+            order_data = LimitOrderRequest(
+                symbol=symbol,
+                qty=qty,
+                side=side,
+                time_in_force=TimeInForce.GTC,
+                limit_price=price
+            )
+        else:
+            order_data = MarketOrderRequest(
                 symbol=symbol,
                 qty=qty,
                 side=side,
                 time_in_force=TimeInForce.GTC
             )
-        )
+            
+        order = trading_client.submit_order(order_data=order_data)
         record_trade(BOT_NAME, symbol, side.value, qty, price, order_id=order.id)
-        logger.info(f"✅ Order submitted: {side.value} {symbol} {qty:.6f}")
+        logger.info(f"✅ Order submitted: {side.value} {symbol} {qty:.6f} limit={price if side == OrderSide.SELL else 'MKT'}")
         return True
     except Exception as e:
         logger.error(f"Order failed: {e}")
