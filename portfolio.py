@@ -174,3 +174,25 @@ def swap_weakest_position(new_symbol: str, new_signal: float, latest_signals: di
         logger.error(f"swap_weakest_position failed: {e}")
         
     return False
+
+def cancel_stale_orders(timeout_minutes=3):
+    """
+    Finds and cancels any open orders that have been sitting unfilled for longer than timeout_minutes.
+    This frees up buying power that gets locked by Limit Order Entries.
+    """
+    try:
+        from alpaca.trading.requests import GetOrdersRequest
+        from alpaca.trading.enums import QueryOrderStatus
+        from datetime import datetime, timezone
+        
+        req = GetOrdersRequest(status=QueryOrderStatus.OPEN)
+        open_orders = trading_client.get_orders(req)
+        now = datetime.now(timezone.utc)
+        
+        for order in open_orders:
+            order_age = (now - order.created_at).total_seconds() / 60.0
+            if order_age > timeout_minutes:
+                logger.info(f"🗑️ Canceling stale unfilled order {order.id} for {order.symbol} (Age: {order_age:.1f}m)")
+                trading_client.cancel_order_by_id(order.id)
+    except Exception as e:
+        logger.error(f"Failed to cancel stale orders: {e}")

@@ -29,16 +29,18 @@ async def place_order(symbol: str, side: OrderSide, qty: float, price: float = N
                 limit_price=price
             )
         else:
-            order_data = MarketOrderRequest(
+            limit_price = price * 1.001 if price else None
+            order_data = LimitOrderRequest(
                 symbol=symbol,
                 qty=qty,
                 side=side,
                 time_in_force=TimeInForce.GTC,
+                limit_price=limit_price
             )
 
         order = trading_client.submit_order(order_data=order_data)
         record_trade(BOT_NAME, symbol, side.value, qty, price, order_id=order.id)
-        logger.info(f"✅ Order submitted: {side.value} {symbol} {qty:.6f} limit={price if side == OrderSide.SELL else 'MKT'}")
+        logger.info(f"✅ Order submitted: {side.value} {symbol} {qty:.6f} limit={price if side == OrderSide.SELL else limit_price}")
         return True
 
     except Exception as e:

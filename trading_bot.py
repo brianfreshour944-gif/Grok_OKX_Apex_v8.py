@@ -85,6 +85,7 @@ data_client = CryptoHistoricalDataClient()
 cooldown_until = {symbol: 0.0 for symbol in SYMBOLS}
 entry_time     = {}   # symbol -> timestamp, tracks how long a position has been held
 latest_signals = {}
+highest_prices = {}   # symbol -> highest price seen while holding
 start_equity   = None
 
 # --- Track sell retry attempts to prevent spam ---
@@ -379,6 +380,28 @@ def swap_weakest_position(new_symbol: str, new_signal: float, latest_signals: di
         
     return False
 
+def cancel_stale_orders(timeout_minutes=3):
+    """
+    Finds and cancels any open orders that have been sitting unfilled for longer than timeout_minutes.
+    This frees up buying power that gets locked by Limit Order Entries.
+    """
+    try:
+        from alpaca.trading.requests import GetOrdersRequest
+        from alpaca.trading.enums import QueryOrderStatus
+        from datetime import datetime, timezone
+        
+        req = GetOrdersRequest(status=QueryOrderStatus.OPEN)
+        open_orders = trading_client.get_orders(req)
+        now = datetime.now(timezone.utc)
+        
+        for order in open_orders:
+            order_age = (now - order.created_at).total_seconds() / 60.0
+            if order_age > timeout_minutes:
+                logger.info(f"🗑️ Canceling stale unfilled order {order.id} for {order.symbol} (Age: {order_age:.1f}m)")
+                trading_client.cancel_order_by_id(order.id)
+    except Exception as e:
+        logger.error(f"Failed to cancel stale orders: {e}")
+
 # ========================= STARTUP SYNC =========================
 def sync_existing_positions():
     """
@@ -434,6 +457,8 @@ async def run_trading_mode():
 
     while True:
         try:
+            cancel_stale_orders(timeout_minutes=3)
+            
             account = trading_client.get_account()
             equity  = float(account.equity)
             if start_equity is None:
@@ -537,9 +562,18 @@ async def run_trading_mode():
                     pnl_pct     = (price - avg_entry) / avg_entry if avg_entry > 0 else 0.0
                     held_hours  = (now - entry_time.get(symbol, now)) / 3600
                     exit_reason = None
+                    
+                    # Trailing Stop-Loss Peak Tracking
+                    highest_seen = highest_prices.get(symbol, avg_entry)
+                    if price > highest_seen:
+                        highest_prices[symbol] = price
+                        highest_seen = price
 
-                    if pnl_pct >= PROFIT_TARGET_PCT:
-                        exit_reason = f"🎯 Profit target ({pnl_pct*100:.2f}%)"
+                    if highest_seen > avg_entry * (1 + PROFIT_TARGET_PCT):
+                        # Trailing Mode Active (e.g. 1% trailing stop from peak)
+                        trailing_stop_price = highest_seen * 0.99
+                        if price <= trailing_stop_price:
+                            exit_reason = f"📉 Trailing Stop triggered (Peak: ${highest_seen:.2f}, PnL: {pnl_pct*100:.2f}%)"
                     elif pnl_pct <= -STOP_LOSS_PCT:
                         exit_reason = f"🛑 Stop loss ({pnl_pct*100:.2f}%)"
                     elif held_hours >= MAX_HOLD_HOURS:
@@ -555,10 +589,12 @@ async def run_trading_mode():
                         if success:
                             cooldown_until[symbol] = now + 1800
                             entry_time.pop(symbol, None)
+                            highest_prices.pop(symbol, None)
                     else:
                         logger.info(
                             f"📌 Holding {symbol} | Entry: ${avg_entry:.4f} | "
-                            f"Now: ${price:.4f} | PnL: {pnl_pct*100:+.2f}% | "
+                            f"Now: ${price:.4f} | Peak: ${highest_seen:.4f} | "
+                            f"PnL: {pnl_pct*100:+.2f}% | "
                             f"Held: {held_hours:.1f}h | Signal: {signal:.3f}")
                     await asyncio.sleep(2)
                     continue
@@ -656,16 +692,18 @@ async def place_order(symbol, side, qty, price=None):
                 limit_price=price
             )
         else:
-            order_data = MarketOrderRequest(
+            limit_price = price * 1.001 if price else None
+            order_data = LimitOrderRequest(
                 symbol=symbol,
                 qty=qty,
                 side=side,
-                time_in_force=TimeInForce.GTC
+                time_in_force=TimeInForce.GTC,
+                limit_price=limit_price
             )
             
         order = trading_client.submit_order(order_data=order_data)
         record_trade(BOT_NAME, symbol, side.value, qty, price, order_id=order.id)
-        logger.info(f"✅ Order submitted: {side.value} {symbol} {qty:.6f} limit={price if side == OrderSide.SELL else 'MKT'}")
+        logger.info(f"✅ Order submitted: {side.value} {symbol} {qty:.6f} limit={price if side == OrderSide.SELL else limit_price}")
         return True
     except Exception as e:
         logger.error(f"Order failed: {e}")

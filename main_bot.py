@@ -25,7 +25,7 @@ from regime import compute_regime_and_trend, calculate_adjusted_risk
 from portfolio import (
     get_all_positions, get_buying_power,
     sell_largest_position, sync_existing_positions, normalize_symbol,
-    swap_weakest_position,
+    swap_weakest_position, cancel_stale_orders
 )
 from orders import place_order
 from feature_engineering import add_features, FEATURE_COLS
@@ -36,6 +36,7 @@ import joblib
 cooldown_until: dict = {symbol: 0.0 for symbol in SYMBOLS}
 entry_time:     dict = {}
 latest_signals: dict = {}
+highest_prices: dict = {}
 start_equity         = None
 
 import json
@@ -157,6 +158,8 @@ async def run_trading_mode():
 
     while True:
         try:
+            cancel_stale_orders(timeout_minutes=3)
+            
             current_dt = dt.now()
             if not is_closed_candle(current_dt):
                 logger.info(f"⏳ Waiting for candle close. Current time: {current_dt.strftime('%H:%M:%S')}. Skipping prediction.")
@@ -265,9 +268,17 @@ async def run_trading_mode():
                     pnl_pct    = (price - avg_entry) / avg_entry if avg_entry > 0 else 0.0
                     held_hours = (now - entry_time.get(symbol, now)) / 3600
                     exit_reason = None
+                    
+                    highest_seen = highest_prices.get(symbol, avg_entry)
+                    if price > highest_seen:
+                        highest_prices[symbol] = price
+                        highest_seen = price
 
-                    if pnl_pct >= regime_params["profit_target_pct"]:
-                        exit_reason = f"🎯 Profit target ({pnl_pct*100:.2f}%) [{regime}]"
+                    if highest_seen > avg_entry * (1 + regime_params["profit_target_pct"]):
+                        # Trailing Mode Active (1% trailing stop from peak)
+                        trailing_stop_price = highest_seen * 0.99
+                        if price <= trailing_stop_price:
+                            exit_reason = f"📉 Trailing Stop triggered (Peak: ${fmt_price(highest_seen)}, PnL: {pnl_pct*100:.2f}%) [{regime}]"
                     elif pnl_pct <= -regime_params["stop_loss_pct"]:
                         exit_reason = f"🛑 Stop loss ({pnl_pct*100:.2f}%) [{regime}]"
                     elif held_hours >= MAX_HOLD_HOURS:
@@ -281,10 +292,12 @@ async def run_trading_mode():
                         if success:
                             cooldown_until[symbol] = now + 1800
                             entry_time.pop(symbol, None)
+                            highest_prices.pop(symbol, None)
                     else:
                         logger.info(
                             f"📌 Holding {symbol} | Entry: ${fmt_price(avg_entry)} | "
-                            f"Now: ${fmt_price(price)} | PnL: {pnl_pct*100:+.2f}% | "
+                            f"Now: ${fmt_price(price)} | Peak: ${fmt_price(highest_seen)} | "
+                            f"PnL: {pnl_pct*100:+.2f}% | "
                             f"Held: {held_hours:.1f}h | Signal: {signal:.3f}"
                         )
                     await asyncio.sleep(2)
