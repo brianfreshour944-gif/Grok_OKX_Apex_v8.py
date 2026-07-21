@@ -396,8 +396,8 @@ async def run_trading_mode():
                         total_ask_size = sum(a.s for a in book.asks)
                         imbalance = total_bid_size / total_ask_size if total_ask_size > 0 else 1.0
                         
-                        if imbalance < 1.0:
-                            logger.info(f"🚫 BUY skipped {symbol}: Whale Filter blocked (Imbalance {imbalance:.2f} < 1.0)")
+                        if imbalance < 0.65:
+                            logger.info(f"🚫 BUY skipped {symbol}: Extreme selling pressure ({imbalance:.2f})")
                             await asyncio.sleep(2)
                             continue
                     except Exception as e:

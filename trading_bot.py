@@ -36,44 +36,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+from config import (
+    BASE_RISK_PERCENT, MAX_SINGLE_TRADE_USD, MAX_DRAWDOWN_STOP,
+    MAX_OPEN_POSITIONS, MAX_HOLD_HOURS, PROFIT_TARGET_PCT, STOP_LOSS_PCT,
+    BUY_SIGNAL, SELL_SIGNAL, MIN_POSITION_USD, MIN_ORDER_USD,
+    MIN_HOLD_HOURS_BEFORE_SIGNAL, SYMBOLS as CONFIG_SYMBOLS,
+    get_regime_params
+)
+SYMBOLS = ["BTC/USD", "ETH/USD", "SOL/USD"]
+
+
+
 # ========================= CONFIG =========================
 BOT_NAME = os.getenv("BOT_NAME", "Grok_Alpaca_Apex_v9_CuttingEdge")
-SYMBOLS = ["BTC/USD", "ETH/USD", "SOL/USD", "DOGE/USD"]
-
-ACCOUNT_BASE          = float(os.getenv("ACCOUNT_BASE", 10000))
-BASE_RISK_PERCENT     = 0.006
-MAX_SINGLE_TRADE_USD  = 120
-MAX_DRAWDOWN_STOP     = -10.0
-
-# --- NEW: position / risk management ---
-MAX_PORTFOLIO_VALUE   = 190.0   # Hard cap on total $ held across all symbols
-MAX_OPEN_POSITIONS    = 2       # Don't hold more than this many symbols at once
-MAX_HOLD_HOURS        = 4.0     # Force-sell after this long regardless of signal
-
-# --- FIX: BUY_SIGNAL / SELL_SIGNAL are now overridable via env vars so you
-# can tune the entry threshold without redeploying code. The bot appeared
-# permanently "idle" (Positions: 0/10, Value: $0.00) because BUY_SIGNAL=0.62
-# is a high bar for the model's raw sigmoid output -- if the model's
-# predictions rarely/never cross that threshold, NO asset will ever qualify
-# for entry, no matter how many are scanned each cycle. Lower BUY_SIGNAL via
-# env var (e.g. 0.55) to confirm/fix, and pair with LOG_LEVEL=DEBUG below to
-# see each symbol's actual signal value every cycle. ---
-PROFIT_TARGET_PCT     = 0.02    # Sell if up 2%
-STOP_LOSS_PCT         = 0.03    # Sell if down 3%
-# --- TEMP DIAGNOSTIC: lowered from 0.62 to 0.51 (just above neutral coin-flip)
-# to prove the model is alive and producing a valid statistical edge. Once you
-# confirm trades fire and see real signal values in the logs, raise this back
-# up gradually (0.55, 0.58, ...) to find the confidence/frequency sweet spot. ---
-BUY_SIGNAL            = float(os.getenv("BUY_SIGNAL", 0.51))
-SELL_SIGNAL           = float(os.getenv("SELL_SIGNAL", 0.45))  # FIX: widened gap from BUY_SIGNAL (was 0.55) to reduce
-                                 # exits on model noise right around the 0.5 midpoint
-
-
-# --- NEW: fixes for dust-order bug and signal-exit whipsaw (see log analysis) ---
-MIN_POSITION_USD              = 5.0   # ignore/never re-sell positions worth less than this
-MIN_HOLD_HOURS_BEFORE_SIGNAL  = 0.5   # don't let a weak-signal reading exit a position
-                                       # until it's been held at least this long
-
 SEQUENCE_LEN = 32
 MODEL_PATH = "grok_gqa_v9_best.pth"
 
@@ -177,35 +152,7 @@ def safe_add_features(df: pd.DataFrame) -> pd.DataFrame:
     return _add_features(df)
 
 
-def compute_regime_and_trend(df: pd.DataFrame):
-    try:
-        tr = pd.concat([
-            df['high'] - df['low'],
-            (df['high'] - df['close'].shift()).abs(),
-            (df['low']  - df['close'].shift()).abs()
-        ], axis=1).max(axis=1)
-        atr     = tr.rolling(14).mean().iloc[-1]
-        price   = df['close'].iloc[-1]
-        atr_pct = (atr / price) * 100 if price > 0 else 0.0
-        
-        # Volatility-Adjusted Moving Average (VAMA)
-        base_span = 50
-        baseline_vol = 1.5
-        
-        if atr_pct > 0:
-            vol_ratio = atr_pct / baseline_vol
-            vol_ratio = max(0.5, min(vol_ratio, 5.0))
-            dynamic_span = max(10, int(base_span / vol_ratio))
-        else:
-            dynamic_span = base_span
-            
-        adaptive_ma   = df['close'].ewm(span=dynamic_span).mean().iloc[-1]
-        trend   = "up" if price > adaptive_ma else "down"
-        regime  = "wild" if atr_pct > 4.0 else "normal" if atr_pct > 2.0 else "quiet"
-        return regime, trend, round(atr_pct, 2)
-    except Exception:
-        return "normal", "neutral", 2.0
-
+from regime import compute_regime_and_trend
 
 # ========================= MODEL =========================
 class SafeMLPredictor:
@@ -565,17 +512,19 @@ async def run_trading_mode():
             total_value        = sum(p['market_value'] for p in current_positions.values())
             buying_power       = get_buying_power()
 
+            max_portfolio_value = equity * BASE_RISK_PERCENT * MAX_OPEN_POSITIONS
+            
             logger.info(
                 f"📊 Cycle | Positions: {open_count}/{MAX_OPEN_POSITIONS} | "
                 f"Value: ${total_value:.2f} | BP: ${buying_power:.2f} | "
-                f"Drawdown: {drawdown:.2f}%")
+                f"Drawdown: {drawdown:.2f}% | Portfolio cap: ${max_portfolio_value:.2f}")
 
             buys_allowed             = True
             running_portfolio_value  = total_value
 
-            if total_value >= MAX_PORTFOLIO_VALUE:
+            if total_value >= max_portfolio_value:
                 logger.warning(
-                    f"📉 Portfolio ${total_value:.2f} >= cap ${MAX_PORTFOLIO_VALUE:.2f}")
+                    f"📉 Portfolio ${total_value:.2f} >= cap ${max_portfolio_value:.2f}")
                 sell_largest_position()
                 buys_allowed = False
 
@@ -709,8 +658,8 @@ async def run_trading_mode():
                         total_ask_size = sum(a.s for a in book.asks)
                         imbalance = total_bid_size / total_ask_size if total_ask_size > 0 else 1.0
                         
-                        if imbalance < 1.0:
-                            logger.info(f"🚫 BUY skipped {symbol}: Whale Filter blocked (Imbalance {imbalance:.2f} < 1.0)")
+                        if imbalance < 0.65:
+                            logger.info(f"🚫 BUY skipped {symbol}: Extreme selling pressure ({imbalance:.2f})")
                             await asyncio.sleep(2)
                             continue
                     except Exception as e:
@@ -748,7 +697,7 @@ async def run_trading_mode():
                         continue
 
                     # --- NEW: headroom check ---
-                    headroom = MAX_PORTFOLIO_VALUE - running_portfolio_value
+                    headroom = max_portfolio_value - running_portfolio_value
                     if headroom < trade_value:
                         logger.warning(
                             f"🚫 BUY blocked {symbol}: only ${headroom:.2f} headroom "
