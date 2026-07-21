@@ -319,11 +319,14 @@ async def run_trading_mode():
                             await asyncio.sleep(2)
                             continue
 
-                    # Dynamic Position Sizing based on ML signal strength
-                    # Base multiplier is 1.0, scales up to 2.0 as signal approaches 1.0
-                    signal_strength_multiplier = 1.0 + max(0, (signal - BUY_SIGNAL) / (1.0 - BUY_SIGNAL))
+                    # Dynamic Position Sizing using Kelly Criterion
+                    kelly_mult = calculate_kelly_multiplier(
+                        signal_prob=signal,
+                        profit_target_pct=regime_params["profit_target_pct"],
+                        stop_loss_pct=regime_params["stop_loss_pct"]
+                    )
                     
-                    adjusted_risk = calculate_adjusted_risk(equity, atr_pct) * position_size_multiplier * signal_strength_multiplier
+                    adjusted_risk = calculate_adjusted_risk(equity, atr_pct) * position_size_multiplier * kelly_mult
                     qty           = adjusted_risk / price
                     trade_value   = qty * price
 

@@ -196,3 +196,31 @@ def cancel_stale_orders(timeout_minutes=3):
                 trading_client.cancel_order_by_id(order.id)
     except Exception as e:
         logger.error(f"Failed to cancel stale orders: {e}")
+
+def calculate_kelly_multiplier(signal_prob: float, profit_target_pct: float, stop_loss_pct: float) -> float:
+    """
+    Dynamically calculates a Half-Kelly multiplier based on the ML model's win probability.
+    W = signal_prob (the model's confidence in the trade)
+    R = Reward/Risk ratio (profit_target / stop_loss)
+    Returns a multiplier (e.g., 0.5 to 3.0) to scale the BASE_RISK_PERCENT.
+    """
+    if stop_loss_pct <= 0 or profit_target_pct <= 0:
+        return 1.0
+        
+    w = signal_prob
+    r = profit_target_pct / stop_loss_pct
+    
+    # Kelly Formula: K = W - ((1 - W) / R)
+    kelly_fraction = w - ((1.0 - w) / r)
+    
+    # If the edge is technically negative (Kelly < 0), we default to a minimal base multiplier 
+    # instead of 0, assuming the user's hard BUY_SIGNAL threshold already filters bad trades.
+    if kelly_fraction <= 0:
+        return 0.5
+        
+    # We map the Kelly fraction to a conservative multiplier (Half-Kelly approach)
+    # A 10% Kelly fraction (0.10) is huge. We'll map K=0.0 -> 0.5x, K=0.10 -> 2.0x, K>=0.20 -> 3.0x
+    multiplier = 0.5 + (kelly_fraction * 15.0)
+    
+    # Cap the multiplier to prevent over-leveraging
+    return max(0.5, min(multiplier, 3.0))

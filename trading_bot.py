@@ -402,6 +402,20 @@ def cancel_stale_orders(timeout_minutes=3):
     except Exception as e:
         logger.error(f"Failed to cancel stale orders: {e}")
 
+def calculate_kelly_multiplier(signal_prob: float, profit_target_pct: float, stop_loss_pct: float) -> float:
+    if stop_loss_pct <= 0 or profit_target_pct <= 0:
+        return 1.0
+        
+    w = signal_prob
+    r = profit_target_pct / stop_loss_pct
+    kelly_fraction = w - ((1.0 - w) / r)
+    
+    if kelly_fraction <= 0:
+        return 0.5
+        
+    multiplier = 0.5 + (kelly_fraction * 15.0)
+    return max(0.5, min(multiplier, 3.0))
+
 # ========================= STARTUP SYNC =========================
 def sync_existing_positions():
     """
@@ -612,11 +626,14 @@ async def run_trading_mode():
                             await asyncio.sleep(2)
                             continue
 
-                    # Dynamic Position Sizing based on ML signal strength
-                    # Base multiplier is 1.0, scales up to 2.0 as signal approaches 1.0
-                    signal_strength_multiplier = 1.0 + max(0, (signal - BUY_SIGNAL) / (1.0 - BUY_SIGNAL))
+                    # Dynamic Position Sizing using Kelly Criterion
+                    kelly_mult = calculate_kelly_multiplier(
+                        signal_prob=signal,
+                        profit_target_pct=PROFIT_TARGET_PCT,
+                        stop_loss_pct=STOP_LOSS_PCT
+                    )
                     
-                    risk_usd = equity * BASE_RISK_PERCENT * signal_strength_multiplier
+                    risk_usd = equity * BASE_RISK_PERCENT * kelly_mult
                     qty      = risk_usd / price
                     if qty * price > MAX_SINGLE_TRADE_USD:
                         qty = MAX_SINGLE_TRADE_USD / price
