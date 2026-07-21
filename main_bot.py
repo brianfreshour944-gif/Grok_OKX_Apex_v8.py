@@ -217,7 +217,7 @@ async def run_trading_mode():
                     # FORCE LOG AT INFO LEVEL - this will appear 100%
                     logger.info(
                         f"🔬 TEST | Asset: {symbol} | ML Signal: {signal:.4f} | "
-                        f"Threshold: {BUY_SIGNAL} | Trend: {trend}"
+                        f"Threshold: {regime_params['buy_signal']:.4f} (regime={regime}) | Trend: {trend}"
                     )
                 except Exception as ml_error:
                     logger.error(f"💥 ML CRASH on {symbol}: {repr(ml_error)}")
@@ -296,18 +296,29 @@ async def run_trading_mode():
                 # close vs EMA-50.
                 if trend == "up" and signal > regime_params["buy_signal"]:
                     # ── Whale Filter (Level 2 Execution Gate) ──
+                    # If orderbook fetch fails, skip the trade rather than
+                    # proceeding blindly without depth data.
+                    _whale_veto = False
                     try:
                         book = await get_orderbook_with_retry(symbol)
-                        total_bid_size = sum(b.s for b in book.bids)
-                        total_ask_size = sum(a.s for a in book.asks)
+                        # alpaca-py uses .s for size; fallback to .size for
+                        # forward-compatibility if the attribute name changes.
+                        def _quote_size(q):
+                            return getattr(q, 's', None) or getattr(q, 'size', 0) or 0
+                        total_bid_size = sum(_quote_size(b) for b in book.bids)
+                        total_ask_size = sum(_quote_size(a) for a in book.asks)
                         imbalance = total_bid_size / total_ask_size if total_ask_size > 0 else 1.0
                         
                         if imbalance < 0.65:
                             logger.info(f"🚫 BUY skipped {symbol}: Extreme selling pressure ({imbalance:.2f})")
-                            await asyncio.sleep(2)
-                            continue
+                            _whale_veto = True
                     except Exception as e:
-                        logger.error(f"Failed to fetch orderbook for {symbol}: {e}")
+                        logger.warning(f"⚠️ Orderbook fetch failed for {symbol} — skipping buy to be safe: {e}")
+                        _whale_veto = True
+
+                    if _whale_veto:
+                        await asyncio.sleep(2)
+                        continue
 
                     if not buys_allowed:
                         if swap_weakest_position(symbol, signal, latest_signals):
