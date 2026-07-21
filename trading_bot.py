@@ -17,6 +17,7 @@ from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.data.historical import CryptoHistoricalDataClient
 from alpaca.data.requests import CryptoBarsRequest
 from alpaca.data.timeframe import TimeFrame
+from alpaca.data.live import CryptoDataStream
 
 from ml_predictor import GrokGQA_Transformer, FEATURE_COLS
 from notifications import send_discord_alert
@@ -449,8 +450,63 @@ def sync_existing_positions():
                 logger.info(
                     f"♻️  Restored: {sym} | qty={data['qty']:.6f} | "
                     f"avg_entry=${data['avg_entry']:.4f}")
-                break
+# ========================= WEBSOCKET STREAMING =========================
+async def run_websocket_stream():
+    """
+    Subscribes to live trade ticks for instantaneous trailing stop execution.
+    Runs concurrently with the main 40-second polling loop.
+    """
+    logger.info("📡 Starting Alpaca CryptoDataStream for live Trailing Stops...")
+    
+    async def trade_handler(t):
+        symbol = t.symbol.replace("/", "")
+        # Only process if we actually hold this symbol
+        positions = get_all_positions()
+        if symbol not in positions:
+            return
+            
+        pos_data = positions[symbol]
+        avg_entry = pos_data['avg_entry']
+        price = float(t.price)
+        qty_held = pos_data['qty']
+        
+        # Original symbol name format
+        sym = next((s for s in SYMBOLS if normalize_symbol(s) == symbol), None)
+        if not sym: return
+        
+        highest_seen = highest_prices.get(sym, avg_entry)
+        if price > highest_seen:
+            highest_prices[sym] = price
+            highest_seen = price
+            
+        if highest_seen > avg_entry * (1 + PROFIT_TARGET_PCT):
+            trailing_stop_price = highest_seen * 0.99
+            if price <= trailing_stop_price:
+                logger.warning(f"⚡ INSTANT WS TRAILING STOP: {sym} dropped to ${price:.4f} (Peak: ${highest_seen:.4f})")
+                
+                # Check cooldown to avoid spamming Alpaca if the order is already in flight
+                now = time.time()
+                if now < cooldown_until.get(sym, 0): return
+                cooldown_until[sym] = now + 60  # Brief lock
+                
+                success = await place_order(sym, OrderSide.SELL, qty_held, price)
+                if success:
+                    asyncio.create_task(send_discord_alert(
+                        title=f"⚡ WS TRAILING STOP {sym}",
+                        description=f"**Price:** ${price:.4f}\n**Peak:** ${highest_seen:.4f}",
+                        color=0xFF0000
+                    ))
+                    cooldown_until[sym] = now + 1800
+                    entry_time.pop(sym, None)
+                    highest_prices.pop(sym, None)
 
+    try:
+        stream = CryptoDataStream(API_KEY, API_SECRET)
+        stream.subscribe_trades(trade_handler, *SYMBOLS)
+        await stream._run_forever()
+    except Exception as e:
+        logger.error(f"WebSocket stream crashed: {e}")
+        # Will be restarted by Coolify if it fatally kills the process, or we could loop it.
 
 # ========================= MAIN LOOP =========================
 async def run_trading_mode():
@@ -481,6 +537,9 @@ async def run_trading_mode():
     except Exception as e:
         logger.warning(f"⚠️ Could not sync starting_equity: {e}")
     # --- End of new code ---
+
+    # Launch WebSocket stream as a background task
+    asyncio.create_task(run_websocket_stream())
 
     while True:
         try:
