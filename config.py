@@ -57,30 +57,28 @@ MODEL_PATH   = "grok_gqa_v9_best.pth"
 #   quiet = BUY_SIGNAL - 0.04  (more eager in low-vol markets)
 #   wild  = BUY_SIGNAL + 0.06  (more conservative in high-vol markets)
 #   quiet sell = SELL_SIGNAL + 0.02, wild sell = SELL_SIGNAL - 0.03
-REGIME_PARAMS = {
-    "wild": {
-        "buy_signal":        BUY_SIGNAL + 0.06,
-        "sell_signal":       SELL_SIGNAL - 0.03,
-        "profit_target_pct": 0.03,
-        "stop_loss_pct":     0.045,
-    },
-    "normal": {
-        "buy_signal":        BUY_SIGNAL,
-        "sell_signal":       SELL_SIGNAL,
-        "profit_target_pct": PROFIT_TARGET_PCT,
-        "stop_loss_pct":     STOP_LOSS_PCT,
-    },
-    "quiet": {
-        "buy_signal":        BUY_SIGNAL - 0.04,
-        "sell_signal":       SELL_SIGNAL + 0.02,
-        "profit_target_pct": 0.015,
-        "stop_loss_pct":     0.02,
-    },
-}
-
-def get_regime_params(regime: str) -> dict:
-    """Return threshold set for a regime, falling back to 'normal' for unknown labels."""
-    return REGIME_PARAMS.get(regime, REGIME_PARAMS["normal"])
+def get_regime_params(regime: str, base_buy=None, base_sell=None) -> dict:
+    """Return threshold set for a regime computed dynamically to support runtime config changes."""
+    # If not explicitly passed, read the current live variables from the module
+    if base_buy is None:
+        base_buy = BUY_SIGNAL
+    if base_sell is None:
+        base_sell = SELL_SIGNAL
+        
+    offsets = {
+        "wild":   {"buy_offset":  0.06, "sell_offset": -0.03, "tp": 0.03, "sl": 0.045},
+        "normal": {"buy_offset":  0.00, "sell_offset":  0.00, "tp": PROFIT_TARGET_PCT, "sl": STOP_LOSS_PCT},
+        "quiet":  {"buy_offset": -0.04, "sell_offset":  0.02, "tp": 0.015, "sl": 0.02},
+    }
+    
+    off = offsets.get(regime, offsets["normal"])
+    
+    return {
+        "buy_signal":        base_buy + off["buy_offset"],
+        "sell_signal":       base_sell + off["sell_offset"],
+        "profit_target_pct": off["tp"],
+        "stop_loss_pct":     off["sl"],
+    }
 
 
 def fmt_price(p: float) -> str:
