@@ -21,7 +21,6 @@ from config import (
 )
 from database import report_equity
 from data_feeds import get_clean_ohlcv_dataframe
-from alpaca.data.live import CryptoDataStream
 from regime import compute_regime_and_trend, calculate_adjusted_risk
 from portfolio import (
     get_all_positions, get_buying_power,
@@ -91,78 +90,6 @@ predictor = SafeMLPredictor(MODEL_PATH, SEQUENCE_LEN)
 
 
 
-# ========================= WEBSOCKET STREAMING =========================
-async def run_websocket_stream():
-    """
-    Subscribes to live trade ticks for instantaneous trailing stop execution.
-    Runs concurrently with the main polling loop.
-    """
-    logger.info("📡 Starting Alpaca CryptoDataStream for live Trailing Stops...")
-    from config import API_KEY, API_SECRET
-    
-    async def trade_handler(t):
-        symbol = t.symbol.replace("/", "")
-        positions = get_all_positions()
-        if symbol not in positions:
-            return
-            
-        pos_data = positions[symbol]
-        avg_entry = pos_data['avg_entry']
-        price = float(t.price)
-        qty_held = pos_data['qty']
-        
-        sym = next((s for s in SYMBOLS if normalize_symbol(s) == symbol), None)
-        if not sym: return
-        
-        highest_seen = highest_prices.get(sym, avg_entry)
-        if price > highest_seen:
-            highest_prices[sym] = price
-            highest_seen = price
-            
-        regime = "normal"  # Fallback
-        regime_params = get_regime_params(regime)
-            
-        if highest_seen > avg_entry * (1 + regime_params["profit_target_pct"]):
-            trailing_stop_price = highest_seen * 0.99
-            if price <= trailing_stop_price:
-                logger.warning(f"⚡ INSTANT WS TRAILING STOP: {sym} dropped to ${price:.4f} (Peak: ${highest_seen:.4f})")
-                
-                now = time.time()
-                if now < cooldown_until.get(sym, 0): return
-                cooldown_until[sym] = now + 60
-                
-                success = await place_order(sym, OrderSide.SELL, qty_held, price)
-                if success:
-                    asyncio.create_task(send_discord_alert(
-                        title=f"⚡ WS TRAILING STOP {sym}",
-                        description=f"**Price:** ${price:.4f}\n**Peak:** ${highest_seen:.4f}",
-                        color=0xFF0000
-                    ))
-                    cooldown_until[sym] = now + 1800
-                    entry_time.pop(sym, None)
-                    highest_prices.pop(sym, None)
-
-    backoff = 15
-    while True:
-        try:
-            stream = CryptoDataStream(API_KEY, API_SECRET)
-            stream.subscribe_trades(trade_handler, *SYMBOLS)
-            logger.info("📡 WebSocket stream connected.")
-            backoff = 15  # reset on success
-            await stream._run_forever()
-        except ValueError as e:
-            if "connection limit" in str(e).lower():
-                logger.warning(f"⚠️ WebSocket connection limit hit — waiting {backoff}s before retry...")
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 300)  # exponential backoff, cap at 5 min
-            else:
-                logger.error(f"WebSocket ValueError: {e}. Retrying in {backoff}s...")
-                await asyncio.sleep(backoff)
-        except Exception as e:
-            logger.error(f"WebSocket stream crashed: {e}. Retrying in {backoff}s...")
-            await asyncio.sleep(backoff)
-
-
 # ── Main trading loop ──────────────────────────────────────────────────────────
 async def run_trading_mode():
     global start_equity
@@ -195,12 +122,6 @@ async def run_trading_mode():
                     logger.info(f"✅ Synced starting_equity to ${start_equity:.2f} in database")
         except Exception as e:
             logger.warning(f"⚠️ Could not sync starting_equity: {e}")
-
-    # Launch WebSocket as a non-fatal background task
-    ws_task = asyncio.create_task(run_websocket_stream())
-    ws_task.add_done_callback(
-        lambda t: logger.warning(f"⚠️ WebSocket task ended: {t.exception()}") if not t.cancelled() and t.exception() else None
-    )
 
     while True:
         try:
