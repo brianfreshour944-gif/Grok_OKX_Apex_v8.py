@@ -639,6 +639,14 @@ async def run_trading_mode():
                         qty = MAX_SINGLE_TRADE_USD / price
                     trade_value = qty * price
 
+                    if trade_value < MIN_ORDER_USD:
+                        logger.info(
+                            f"🚫 BUY skipped {symbol}: ${trade_value:.2f} below "
+                            f"${MIN_ORDER_USD:.2f} minimum (ATR%: {atr_pct:.2f}%)"
+                        )
+                        await asyncio.sleep(2)
+                        continue
+
                     # --- NEW: headroom check ---
                     headroom = MAX_PORTFOLIO_VALUE - running_portfolio_value
                     if headroom < trade_value:
