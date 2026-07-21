@@ -177,12 +177,14 @@ async def run_websocket_stream():
                     entry_time.pop(sym, None)
                     highest_prices.pop(sym, None)
 
-    try:
-        stream = CryptoDataStream(API_KEY, API_SECRET)
-        stream.subscribe_trades(trade_handler, *SYMBOLS)
-        await stream._run_forever()
-    except Exception as e:
-        logger.error(f"WebSocket stream crashed: {e}")
+    while True:
+        try:
+            stream = CryptoDataStream(API_KEY, API_SECRET)
+            stream.subscribe_trades(trade_handler, *SYMBOLS)
+            await stream._run_forever()
+        except Exception as e:
+            logger.error(f"WebSocket stream crashed: {e}. Retrying in 15 seconds...")
+            await asyncio.sleep(15)
 
 
 # ── Main trading loop ──────────────────────────────────────────────────────────
