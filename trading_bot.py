@@ -447,14 +447,25 @@ async def run_websocket_stream():
                     entry_time.pop(sym, None)
                     highest_prices.pop(sym, None)
 
+    backoff = 15
     while True:
         try:
             stream = CryptoDataStream(API_KEY, API_SECRET)
             stream.subscribe_trades(trade_handler, *SYMBOLS)
+            logger.info("📡 WebSocket stream connected.")
+            backoff = 15
             await stream._run_forever()
+        except ValueError as e:
+            if "connection limit" in str(e).lower():
+                logger.warning(f"⚠️ WebSocket connection limit hit — waiting {backoff}s before retry...")
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 300)
+            else:
+                logger.error(f"WebSocket ValueError: {e}. Retrying in {backoff}s...")
+                await asyncio.sleep(backoff)
         except Exception as e:
-            logger.error(f"WebSocket stream crashed: {e}. Retrying in 15 seconds...")
-            await asyncio.sleep(15)
+            logger.error(f"WebSocket stream crashed: {e}. Retrying in {backoff}s...")
+            await asyncio.sleep(backoff)
 
 # ========================= MAIN LOOP =========================
 async def run_trading_mode():
