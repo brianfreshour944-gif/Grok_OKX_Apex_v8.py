@@ -115,7 +115,7 @@ PAPER      = os.getenv("APCA_API_PAPER", "true").lower() == "true"
 
 logger.info(
     f"🔑 Credential check — key_len={len(API_KEY)} key_last4={API_KEY[-4:]} | "
-    f"secret_len={len(API_SECRET)} secret_last4={API_SECRET[-4:]} | paper={PAPER}"
+    f"secret_len={len(API_SECRET)} | paper={PAPER}"
 )
 
 trading_client = TradingClient(api_key=API_KEY, secret_key=API_SECRET, paper=PAPER)

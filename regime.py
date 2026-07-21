@@ -49,7 +49,8 @@ def compute_regime_and_trend(df: pd.DataFrame):
         regime = "wild"  if atr_pct > 4.0 else "normal" if atr_pct > 2.0 else "quiet"
         return regime, trend, round(atr_pct, 2)
 
-    except Exception:
+    except Exception as exc:
+        logger.error(f"⚠️ regime calc failed ({type(exc).__name__}: {exc}) — defaulting to normal/neutral")
         return "normal", "neutral", 2.0
 
 

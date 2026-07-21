@@ -84,13 +84,16 @@ async def get_clean_ohlcv_dataframe(symbol):
         req  = CryptoBarsRequest(
             symbol_or_symbols=symbol,
             timeframe=TimeFrame(15, TimeFrameUnit.Minute),
-            limit=600,
+            limit=64,
         )
         bars = data_client.get_crypto_bars(req).data.get(symbol, [])
         
-        # Ensure we only trade on finalized data by filtering out the current incomplete minute
-        current_minute = datetime.now(timezone.utc).replace(second=0, microsecond=0)
-        bars = [b for b in bars if b.timestamp < current_minute]
+        # Filter out the current incomplete bar by checking bar CLOSE time
+        # (bar timestamp = bar open; a 15-min bar opened at 14:00 closes at 14:15)
+        # We exclude any bar whose close time (open + 15 min) is in the future.
+        bar_duration = timedelta(minutes=15)
+        now_utc = datetime.now(timezone.utc)
+        bars = [b for b in bars if b.timestamp + bar_duration <= now_utc]
         
         if len(bars) < SEQUENCE_LEN:
             return None

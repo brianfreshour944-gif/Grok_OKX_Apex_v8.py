@@ -19,9 +19,9 @@ from config import (
     BASE_RISK_PERCENT, MIN_POSITION_USD, MIN_ORDER_USD, MAX_SINGLE_TRADE_USD,
     MIN_HOLD_HOURS_BEFORE_SIGNAL, BUY_SIGNAL,
     COOLDOWN_SECONDS_BUY, COOLDOWN_SECONDS_SELL, SLEEP_PER_LOOP,
-    get_regime_params, fmt_price, trading_client, data_client, SYMBOLS,
+    get_regime_params, fmt_price, trading_client, SYMBOLS,
 )
-from database import report_equity
+from database import report_equity, init_db
 from data_feeds import get_clean_ohlcv_dataframe, get_orderbook_with_retry
 from regime import compute_regime_and_trend, calculate_adjusted_risk
 from portfolio import (
@@ -97,6 +97,7 @@ async def run_trading_mode():
     global start_equity
 
     sync_existing_positions(entry_time)
+    init_db()  # create DB tables once at startup (no-op if DATABASE_URL not set)
     logger.info("🚀 Grok Apex Ironclad Bot v9 - Cutting Edge Started")
 
     # ── Startup cleanup: close any positions in symbols we no longer trade ──────
@@ -139,7 +140,7 @@ async def run_trading_mode():
                             last_update              = NOW()
                     """, (BOT_NAME, float(start_equity or 0), float(start_equity or 0)))
                     conn.commit()
-                    logger.info(f"✅ Synced starting_equity to ${start_equity:.2f} in database")
+                    logger.info(f"✅ Synced starting_equity to ${start_equity or 0:.2f} in database")
         except Exception as e:
             logger.warning(f"⚠️ Could not sync starting_equity: {e}")
 
@@ -369,10 +370,10 @@ async def run_trading_mode():
                         if open_count >= MAX_OPEN_POSITIONS:
                             logger.info("🔒 Max positions reached — no more buys this cycle.")
                             buys_allowed = False
-
-                if "--once" in sys.argv:
-                    logger.info("🏁 --once flag passed. Cycle complete. Exiting.")
-                    break
+            # ── --once test flag: exit after first full cycle ──────────────────
+            if "--once" in sys.argv:
+                logger.info("🏁 --once flag passed. Cycle complete. Exiting.")
+                return
 
             # Sleep once per entire cycle, not once per asset
             await asyncio.sleep(SLEEP_PER_LOOP)
