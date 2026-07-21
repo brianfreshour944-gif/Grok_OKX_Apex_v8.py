@@ -16,12 +16,13 @@ from alpaca.trading.enums import OrderSide
 from config import (
     logger, BOT_NAME, SEQUENCE_LEN, MODEL_PATH,
     MAX_OPEN_POSITIONS, MAX_DRAWDOWN_STOP, MAX_HOLD_HOURS,
-    BASE_RISK_PERCENT, MIN_POSITION_USD, MIN_ORDER_USD,
+    BASE_RISK_PERCENT, MIN_POSITION_USD, MIN_ORDER_USD, MAX_SINGLE_TRADE_USD,
     MIN_HOLD_HOURS_BEFORE_SIGNAL, BUY_SIGNAL,
+    COOLDOWN_SECONDS_BUY, COOLDOWN_SECONDS_SELL, SLEEP_PER_LOOP,
     get_regime_params, fmt_price, trading_client, data_client, SYMBOLS,
 )
 from database import report_equity
-from data_feeds import get_clean_ohlcv_dataframe
+from data_feeds import get_clean_ohlcv_dataframe, get_orderbook_with_retry
 from regime import compute_regime_and_trend, calculate_adjusted_risk
 from portfolio import (
     get_all_positions, get_buying_power,
@@ -274,7 +275,7 @@ async def run_trading_mode():
                                 description=f"**Price:** ${price:.4f}\n**Reason:** {exit_reason}\n**Regime:** {regime}",
                                 color=0xFF0000
                             ))
-                            cooldown_until[symbol] = now + 1800
+                            cooldown_until[symbol] = now + COOLDOWN_SECONDS_SELL
                             entry_time.pop(symbol, None)
                             highest_prices.pop(symbol, None)
                     else:
@@ -295,9 +296,7 @@ async def run_trading_mode():
                 if trend == "up" and signal > regime_params["buy_signal"]:
                     # ── Whale Filter (Level 2 Execution Gate) ──
                     try:
-                        from alpaca.data.requests import CryptoLatestOrderbookRequest
-                        req = CryptoLatestOrderbookRequest(symbol_or_symbols=[symbol])
-                        book = data_client.get_crypto_latest_orderbook(req)[symbol]
+                        book = await get_orderbook_with_retry(symbol)
                         total_bid_size = sum(b.s for b in book.bids)
                         total_ask_size = sum(a.s for a in book.asks)
                         imbalance = total_bid_size / total_ask_size if total_ask_size > 0 else 1.0
@@ -328,7 +327,8 @@ async def run_trading_mode():
                     
                     adjusted_risk = calculate_adjusted_risk(equity, atr_pct) * position_size_multiplier * kelly_mult
                     qty           = adjusted_risk / price
-                    trade_value   = qty * price
+                    trade_value   = min(qty * price, MAX_SINGLE_TRADE_USD)
+                    qty           = trade_value / price
 
                     if trade_value < MIN_ORDER_USD:
                         logger.info(
@@ -362,7 +362,7 @@ async def run_trading_mode():
                             description=f"**Price:** ${price:.4f}\n**Signal:** {signal:.4f}\n**Size:** ${trade_value:.2f}\n**Regime:** {regime}",
                             color=0x00FF00
                         ))
-                        cooldown_until[symbol]   = now + 900
+                        cooldown_until[symbol]   = now + COOLDOWN_SECONDS_BUY
                         entry_time[symbol]        = now
                         running_portfolio_value  += trade_value
                         open_count               += 1
@@ -375,7 +375,7 @@ async def run_trading_mode():
                     break
 
             # Sleep once per entire cycle, not once per asset
-            await asyncio.sleep(40)
+            await asyncio.sleep(SLEEP_PER_LOOP)
 
         except Exception as e:
             logger.error(f"Critical loop error: {e}")

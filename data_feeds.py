@@ -7,7 +7,20 @@ from alpaca.data.requests import CryptoBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 from config import logger, data_client, SEQUENCE_LEN
+import asyncio
 
+async def get_orderbook_with_retry(symbol: str, retries: int = 3, backoff: float = 1.0):
+    """Fetches the latest orderbook with exponential backoff on failure."""
+    from alpaca.data.requests import CryptoLatestOrderbookRequest
+    for attempt in range(retries):
+        try:
+            req = CryptoLatestOrderbookRequest(symbol_or_symbols=[symbol])
+            return data_client.get_crypto_latest_orderbook(req)[symbol]
+        except Exception as e:
+            logger.warning(f"Orderbook fetch failed for {symbol} (try {attempt+1}/{retries}): {e}")
+            if attempt == retries - 1:
+                raise
+            await asyncio.sleep(backoff * (2 ** attempt))
 
 async def scan_stable_assets(limit_scope: int = 35) -> list:
     """

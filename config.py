@@ -25,6 +25,12 @@ logger.info(f"🔖 Bot code version: {BOT_VERSION}")
 BOT_NAME = os.getenv("BOT_NAME", "Grok_Alpaca_Apex_v9_CuttingEdge")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
+# ── Magic Numbers & Paths ──────────────────────────────────────────────────────
+COOLDOWN_SECONDS_BUY  = 900
+COOLDOWN_SECONDS_SELL = 1800
+SLEEP_PER_LOOP        = 40
+HEARTBEAT_PATH        = os.getenv("HEARTBEAT_PATH", "/tmp/bot_heartbeat.txt")
+
 # ── Universe ───────────────────────────────────────────────────────────────────
 SYMBOLS = [
     "BTC/USD", "ETH/USD", "SOL/USD"
@@ -97,19 +103,20 @@ def fmt_price(p: float) -> str:
 
 
 # ── Alpaca clients (singletons, initialized once on import) ────────────────────
-API_KEY    = os.getenv("APCA_API_KEY_ID")
-API_SECRET = os.getenv("APCA_API_SECRET_KEY")
+def _require_env(name: str) -> str:
+    val = os.getenv(name)
+    if not val:
+        raise RuntimeError(f"🛑 Required env var {name} is missing")
+    return val
+
+API_KEY    = _require_env("APCA_API_KEY_ID")
+API_SECRET = _require_env("APCA_API_SECRET_KEY")
 PAPER      = os.getenv("APCA_API_PAPER", "true").lower() == "true"
 
-if API_KEY and API_SECRET:
-    logger.info(
-        f"🔑 Credential check — key_len={len(API_KEY)} key_last4={API_KEY[-4:]} | "
-        f"secret_len={len(API_SECRET)} secret_last4={API_SECRET[-4:]} | paper={PAPER}"
-    )
-else:
-    logger.error(
-        "🔑 Credential check — APCA_API_KEY_ID or APCA_API_SECRET_KEY missing."
-    )
+logger.info(
+    f"🔑 Credential check — key_len={len(API_KEY)} key_last4={API_KEY[-4:]} | "
+    f"secret_len={len(API_SECRET)} secret_last4={API_SECRET[-4:]} | paper={PAPER}"
+)
 
 trading_client = TradingClient(api_key=API_KEY, secret_key=API_SECRET, paper=PAPER)
 data_client    = CryptoHistoricalDataClient()

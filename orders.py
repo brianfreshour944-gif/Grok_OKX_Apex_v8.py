@@ -44,5 +44,5 @@ async def place_order(symbol: str, side: OrderSide, qty: float, price: float = N
         return True
 
     except Exception as e:
-        logger.error(f"Order failed: {e}")
+        logger.error(f"❌ Order failed ({side.value} {symbol} qty={qty:.6f}): {e}")
         return False

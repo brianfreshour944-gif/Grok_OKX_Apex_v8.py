@@ -6,7 +6,7 @@ from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 
 from config import (
-    logger, trading_client, SYMBOLS, MIN_POSITION_USD
+    logger, trading_client, SYMBOLS, MIN_POSITION_USD, HEARTBEAT_PATH
 )
 
 # Per-symbol sell retry cooldown: prevents spam when settlement is delayed.
@@ -230,10 +230,9 @@ def write_heartbeat():
     import os
     from datetime import datetime, timezone
     try:
-        path = "/tmp/bot_heartbeat.txt" if os.name != "nt" else "bot_heartbeat.txt"
-        # Ensure directory exists if using /tmp
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
+        # Ensure directory exists if using /tmp or similar
+        os.makedirs(os.path.dirname(HEARTBEAT_PATH) or ".", exist_ok=True)
+        with open(HEARTBEAT_PATH, "w") as f:
             f.write(datetime.now(timezone.utc).isoformat())
     except Exception as e:
         logger.error(f"Heartbeat write failed: {e}")
