@@ -25,7 +25,8 @@ from regime import compute_regime_and_trend, calculate_adjusted_risk
 from portfolio import (
     get_all_positions, get_buying_power,
     sell_largest_position, sync_existing_positions, normalize_symbol,
-    swap_weakest_position, cancel_stale_orders
+    swap_weakest_position, cancel_stale_orders, write_heartbeat,
+    calculate_kelly_multiplier
 )
 from orders import place_order
 from feature_engineering import add_features, FEATURE_COLS
@@ -158,6 +159,7 @@ async def run_trading_mode():
 
     while True:
         try:
+            write_heartbeat()
             cancel_stale_orders(timeout_minutes=3)
             
             current_dt = dt.now()

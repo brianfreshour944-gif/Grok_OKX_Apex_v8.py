@@ -416,6 +416,18 @@ def calculate_kelly_multiplier(signal_prob: float, profit_target_pct: float, sto
     multiplier = 0.5 + (kelly_fraction * 15.0)
     return max(0.5, min(multiplier, 3.0))
 
+def write_heartbeat():
+    """Writes a timestamp to a file so external monitors (like Coolify) can verify the bot is alive."""
+    import os
+    from datetime import datetime, timezone
+    try:
+        path = "/tmp/bot_heartbeat.txt" if os.name != "nt" else "bot_heartbeat.txt"
+        os.makedirs(os.path.dirname(path), exist_ok=True) if os.path.dirname(path) else None
+        with open(path, "w") as f:
+            f.write(datetime.now(timezone.utc).isoformat())
+    except Exception as e:
+        logger.error(f"Heartbeat write failed: {e}")
+
 # ========================= STARTUP SYNC =========================
 def sync_existing_positions():
     """
@@ -471,6 +483,7 @@ async def run_trading_mode():
 
     while True:
         try:
+            write_heartbeat()
             cancel_stale_orders(timeout_minutes=3)
             
             account = trading_client.get_account()

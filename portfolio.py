@@ -224,3 +224,16 @@ def calculate_kelly_multiplier(signal_prob: float, profit_target_pct: float, sto
     
     # Cap the multiplier to prevent over-leveraging
     return max(0.5, min(multiplier, 3.0))
+
+def write_heartbeat():
+    """Writes a timestamp to a file so external monitors (like Coolify) can verify the bot is alive."""
+    import os
+    from datetime import datetime, timezone
+    try:
+        path = "/tmp/bot_heartbeat.txt" if os.name != "nt" else "bot_heartbeat.txt"
+        # Ensure directory exists if using /tmp
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(datetime.now(timezone.utc).isoformat())
+    except Exception as e:
+        logger.error(f"Heartbeat write failed: {e}")
