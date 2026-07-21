@@ -19,6 +19,7 @@ from alpaca.data.requests import CryptoBarsRequest
 from alpaca.data.timeframe import TimeFrame
 
 from ml_predictor import GrokGQA_Transformer, FEATURE_COLS
+from notifications import send_discord_alert
 
 load_dotenv()
 
@@ -614,6 +615,11 @@ async def run_trading_mode():
                             f"Regime: {regime}")
                         success = await place_order(symbol, OrderSide.SELL, qty_held, price)
                         if success:
+                            asyncio.create_task(send_discord_alert(
+                                title=f"🔴 SELL {symbol}",
+                                description=f"**Price:** ${price:.4f}\n**Reason:** {exit_reason}\n**Regime:** {regime}",
+                                color=0xFF0000
+                            ))
                             cooldown_until[symbol] = now + 1800
                             entry_time.pop(symbol, None)
                             highest_prices.pop(symbol, None)
@@ -628,6 +634,21 @@ async def run_trading_mode():
 
                 # ---------------- ENTRY LOGIC ----------------
                 if signal > BUY_SIGNAL:
+                    # ── Whale Filter (Level 2 Execution Gate) ──
+                    try:
+                        from alpaca.data.requests import CryptoLatestOrderbookRequest
+                        req = CryptoLatestOrderbookRequest(symbol_or_symbols=[symbol])
+                        book = data_client.get_crypto_latest_orderbook(req)[symbol]
+                        total_bid_size = sum(b.s for b in book.bids)
+                        total_ask_size = sum(a.s for a in book.asks)
+                        imbalance = total_bid_size / total_ask_size if total_ask_size > 0 else 1.0
+                        
+                        if imbalance < 1.0:
+                            logger.info(f"🚫 BUY skipped {symbol}: Whale Filter blocked (Imbalance {imbalance:.2f} < 1.0)")
+                            await asyncio.sleep(2)
+                            continue
+                    except Exception as e:
+                        logger.error(f"Failed to fetch orderbook for {symbol}: {e}")
 
                     if not buys_allowed:
                         if swap_weakest_position(symbol, signal, latest_signals):
@@ -686,6 +707,11 @@ async def run_trading_mode():
                     success = await place_order(symbol, OrderSide.BUY, qty, price)
 
                     if success:
+                        asyncio.create_task(send_discord_alert(
+                            title=f"🟢 BUY {symbol}",
+                            description=f"**Price:** ${price:.4f}\n**Signal:** {signal:.4f}\n**Size:** ${trade_value:.2f}\n**Regime:** {regime}",
+                            color=0x00FF00
+                        ))
                         cooldown_until[symbol]   = now + 900
                         entry_time[symbol]        = now
                         running_portfolio_value  += trade_value

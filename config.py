@@ -23,6 +23,7 @@ logger.info(f"🔖 Bot code version: {BOT_VERSION}")
 
 # ── Identity ───────────────────────────────────────────────────────────────────
 BOT_NAME = os.getenv("BOT_NAME", "Grok_Alpaca_Apex_v9_CuttingEdge")
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
 # ── Universe ───────────────────────────────────────────────────────────────────
 SYMBOLS = [
