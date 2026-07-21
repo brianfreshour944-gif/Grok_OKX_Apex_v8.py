@@ -9,3 +9,4 @@ psycopg2-binary
 sqlalchemy
 pytz
 aiohttp
+websockets<=13.1
