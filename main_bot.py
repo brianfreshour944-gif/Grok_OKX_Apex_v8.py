@@ -95,7 +95,21 @@ async def run_trading_mode():
     global start_equity
 
     sync_existing_positions(entry_time)
-    logger.info("🚀 Grok Apex Ironclad Bot v9 - Cutting Edge with DOGE Started")
+    logger.info("🚀 Grok Apex Ironclad Bot v9 - Cutting Edge Started")
+
+    # ── Startup cleanup: close any positions in symbols we no longer trade ──────
+    try:
+        all_pos = trading_client.get_all_positions()
+        active_alpaca_syms = {normalize_symbol(s) for s in SYMBOLS}
+        for p in all_pos:
+            if p.symbol not in active_alpaca_syms:
+                try:
+                    trading_client.close_position(p.symbol)
+                    logger.info(f"🧹 Startup cleanup: closed stale position {p.symbol} (${float(p.market_value):.2f})")
+                except Exception as close_err:
+                    logger.warning(f"⚠️ Could not close stale position {p.symbol}: {close_err}")
+    except Exception as e:
+        logger.warning(f"⚠️ Startup cleanup failed: {e}")
 
     # Sync starting_equity to DB if configured
     db_url = os.getenv("DATABASE_URL")
