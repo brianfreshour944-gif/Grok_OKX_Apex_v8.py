@@ -4,6 +4,7 @@
 
 import asyncio
 import os
+import sys
 import time
 
 import numpy as np
@@ -17,7 +18,7 @@ from config import (
     MAX_OPEN_POSITIONS, MAX_DRAWDOWN_STOP, MAX_HOLD_HOURS,
     BASE_RISK_PERCENT, MIN_POSITION_USD, MIN_ORDER_USD,
     MIN_HOLD_HOURS_BEFORE_SIGNAL, BUY_SIGNAL,
-    get_regime_params, fmt_price, trading_client, SYMBOLS,
+    get_regime_params, fmt_price, trading_client, data_client, SYMBOLS,
 )
 from database import report_equity
 from data_feeds import get_clean_ohlcv_dataframe
@@ -285,7 +286,7 @@ async def run_trading_mode():
                 # (trend == "up") gates entries so we only buy with the wind at
                 # our back. trend is computed by compute_regime_and_trend() via
                 # close vs EMA-50.
-                if trend == "up" and signal > BUY_SIGNAL:
+                if trend == "up" and signal > regime_params["buy_signal"]:
                     # ── Whale Filter (Level 2 Execution Gate) ──
                     try:
                         from alpaca.data.requests import CryptoLatestOrderbookRequest
@@ -363,7 +364,6 @@ async def run_trading_mode():
                             logger.info("🔒 Max positions reached — no more buys this cycle.")
                             buys_allowed = False
 
-                import sys
                 if "--once" in sys.argv:
                     logger.info("🏁 --once flag passed. Cycle complete. Exiting.")
                     break
