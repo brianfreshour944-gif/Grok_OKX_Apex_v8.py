@@ -20,7 +20,7 @@ from config import (
     get_regime_params, fmt_price, trading_client, SYMBOLS,
 )
 from database import report_equity
-from data_feeds import scan_stable_assets, get_clean_ohlcv_dataframe
+from data_feeds import get_clean_ohlcv_dataframe
 from alpaca.data.live import CryptoDataStream
 from regime import compute_regime_and_trend, calculate_adjusted_risk
 from portfolio import (
@@ -42,28 +42,7 @@ latest_signals: dict = {}
 highest_prices: dict = {}
 start_equity         = None
 
-import json
 
-def read_regime_flag():
-    """Read the regime flag file. Returns a dict with pause flags."""
-    default = {
-        "pause_grok": False,
-        "pause_oracle": False,
-        "grok_multiplier": 1.0,
-        "oracle_multiplier": 1.0,
-        "regime": "normal"
-    }
-    # Path should point to where regime_switch.py runs and writes the file.
-    # We will assume it's C:/Users/brian/OneDrive/Documents/Static-Repo-okx-bot/regime_flag.txt
-    # or just "regime_flag.txt" if running in the same directory.
-    # The user says "in your main directory (where both bots can access it)".
-    try:
-        with open(r"C:\Users\brian\OneDrive\Documents\Static-Repo-okx-bot\regime_flag.txt", "r") as f:
-            data = json.load(f)
-            return data
-    except (FileNotFoundError, json.JSONDecodeError):
-        return default
-# ── ML predictor (inline, tightly coupled to main loop state) ─────────────────
 class SafeMLPredictor:
     def __init__(self, model_path, seq_len=32):
         self.device  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -111,20 +90,6 @@ class SafeMLPredictor:
 predictor = SafeMLPredictor(MODEL_PATH, SEQUENCE_LEN)
 
 
-from datetime import datetime as dt
-import time
-# ... (existing imports)
-
-def is_closed_candle(current_time, interval_minutes=5):
-    """Return True only if the current time is strictly past the 5-min close."""
-    minute = current_time.minute
-    second = current_time.second
-    # 5-minute candles close at :00, :05, :10...
-    # Allow trading at 2 seconds past the close to ensure API data is finalized.
-    # Restrict to the first 30 seconds so it doesn't double-fire if the loop finishes quickly.
-    if minute % interval_minutes == 0 and 2 <= second <= 30:
-        return True
-    return False
 
 # ========================= WEBSOCKET STREAMING =========================
 async def run_websocket_stream():
@@ -242,12 +207,6 @@ async def run_trading_mode():
             write_heartbeat()
             cancel_stale_orders(timeout_minutes=3)
             
-            current_dt = dt.now()
-            if not is_closed_candle(current_dt):
-                logger.info(f"⏳ Waiting for candle close. Current time: {current_dt.strftime('%H:%M:%S')}. Skipping prediction.")
-                await asyncio.sleep(10)
-                continue
-
             account      = trading_client.get_account()
             equity       = float(account.equity)
             if start_equity is None:
@@ -284,14 +243,12 @@ async def run_trading_mode():
                 logger.info(f"🛑 Max positions reached ({open_count}/{MAX_OPEN_POSITIONS}). Holding off on buys.")
                 buys_allowed = False
 
-            active_symbols = await scan_stable_assets(limit_scope=18)
+            # Use SYMBOLS directly — no need to scan 18 assets when we only trade 3
             now = time.time()
-            
-            symbols_to_process = []
-            for sym in active_symbols:
-                cooldown_until.setdefault(sym, 0.0)
-                if now >= cooldown_until.get(sym, 0):
-                    symbols_to_process.append(sym)
+            symbols_to_process = [
+                sym for sym in SYMBOLS
+                if now >= cooldown_until.get(sym, 0.0)
+            ]
 
             # PARALLEL FETCH: Fetch all OHLCV dataframes concurrently
             fetch_tasks = [get_clean_ohlcv_dataframe(sym) for sym in symbols_to_process]
@@ -305,18 +262,9 @@ async def run_trading_mode():
 
                 alpaca_sym = normalize_symbol(symbol)
 
-                regime = compute_regime_and_trend(df)[0] # we still get the native regime/trend
-                regime_params          = get_regime_params(regime)
-                trend                  = compute_regime_and_trend(df)[1]
-                atr_pct                = compute_regime_and_trend(df)[2]
-
-                # ── REGIME SWITCH CHECK ───────────────────────────────────────
-                regime_flag = read_regime_flag()
-                if regime_flag.get("pause_grok", False):
-                    logger.info("⏸️ Grok paused by Regime Switch (Volatile market). Skipping cycle.")
-                    continue  # Skip the entire cycle
-                    
-                position_size_multiplier = regime_flag.get("grok_multiplier", 1.0)
+                regime, trend, atr_pct = compute_regime_and_trend(df)
+                regime_params = get_regime_params(regime)
+                position_size_multiplier = 1.0  # regime_flag removed (was Windows-only path)
 
                 # ── DIAGNOSTIC ML PREDICTION BLOCK ────────────────────────────
                 try:
