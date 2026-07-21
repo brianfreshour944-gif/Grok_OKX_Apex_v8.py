@@ -103,10 +103,14 @@ async def run_trading_mode():
         all_pos = trading_client.get_all_positions()
         active_alpaca_syms = {normalize_symbol(s) for s in SYMBOLS}
         for p in all_pos:
+            market_val = float(p.market_value)
             if p.symbol not in active_alpaca_syms:
+                if market_val < 1.0:
+                    logger.info(f"🧹 Ignoring unsellable dust position {p.symbol} (${market_val:.4f})")
+                    continue
                 try:
                     trading_client.close_position(p.symbol)
-                    logger.info(f"🧹 Startup cleanup: closed stale position {p.symbol} (${float(p.market_value):.2f})")
+                    logger.info(f"🧹 Startup cleanup: closed stale position {p.symbol} (${market_val:.2f})")
                 except Exception as close_err:
                     logger.warning(f"⚠️ Could not close stale position {p.symbol}: {close_err}")
     except Exception as e:
@@ -156,7 +160,9 @@ async def run_trading_mode():
                 break
 
             current_positions   = get_all_positions()
-            open_count          = len(current_positions)
+            # Exclude true dust (< MIN_POSITION_USD) from open_count so they
+            # don't block new entries when they can't be sold anyway.
+            open_count          = sum(1 for p in current_positions.values() if p["market_value"] >= MIN_POSITION_USD)
             total_value         = sum(p["market_value"] for p in current_positions.values())
             buying_power        = get_buying_power()
             max_portfolio_value = equity * BASE_RISK_PERCENT * MAX_OPEN_POSITIONS
