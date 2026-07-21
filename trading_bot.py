@@ -597,13 +597,20 @@ async def run_trading_mode():
                         highest_prices[symbol] = price
                         highest_seen = price
 
+                    # Time-Decay Stop Loss Logic
+                    dynamic_sl_pct = STOP_LOSS_PCT
+                    if held_hours >= 2.0:
+                        dynamic_sl_pct = STOP_LOSS_PCT * 0.5  # Halve the stop loss
+                    elif held_hours >= 1.0:
+                        dynamic_sl_pct = STOP_LOSS_PCT * 0.75 # Tighten by 25%
+
                     if highest_seen > avg_entry * (1 + PROFIT_TARGET_PCT):
                         # Trailing Mode Active (e.g. 1% trailing stop from peak)
                         trailing_stop_price = highest_seen * 0.99
                         if price <= trailing_stop_price:
                             exit_reason = f"📉 Trailing Stop triggered (Peak: ${highest_seen:.2f}, PnL: {pnl_pct*100:.2f}%)"
-                    elif pnl_pct <= -STOP_LOSS_PCT:
-                        exit_reason = f"🛑 Stop loss ({pnl_pct*100:.2f}%)"
+                    elif pnl_pct <= -dynamic_sl_pct:
+                        exit_reason = f"🛑 Time-Decay Stop loss ({pnl_pct*100:.2f}% <= -{dynamic_sl_pct*100:.2f}%)"
                     elif held_hours >= MAX_HOLD_HOURS:
                         exit_reason = f"⏰ Max hold time ({held_hours:.1f}h)"
                     elif held_hours >= MIN_HOLD_HOURS_BEFORE_SIGNAL and signal < SELL_SIGNAL:
