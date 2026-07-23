@@ -42,7 +42,8 @@ async def place_order(symbol: str, side: OrderSide, qty: float, price: float = N
     try:
         if side == OrderSide.SELL:
             qty         = math.floor(qty * 1e8) / 1e8
-            limit_price = _sanitize_price(price) if price else None
+            raw_limit   = price * 0.999 if price else None
+            limit_price = _sanitize_price(raw_limit) if raw_limit else None
             order_data  = LimitOrderRequest(
                 symbol=symbol,
                 qty=qty,

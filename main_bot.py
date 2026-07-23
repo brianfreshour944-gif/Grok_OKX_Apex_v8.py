@@ -189,10 +189,7 @@ async def run_trading_mode():
 
             # Use SYMBOLS directly — no need to scan 18 assets when we only trade 3
             now = time.time()
-            symbols_to_process = [
-                sym for sym in SYMBOLS
-                if now >= cooldown_until.get(sym, 0.0)
-            ]
+            symbols_to_process = SYMBOLS
 
             # PARALLEL FETCH: Fetch all OHLCV dataframes concurrently
             fetch_tasks = [get_clean_ohlcv_dataframe(sym) for sym in symbols_to_process]
@@ -277,8 +274,8 @@ async def run_trading_mode():
                                 color=0xFF0000
                             ))
                             cooldown_until[symbol] = now + COOLDOWN_SECONDS_SELL
-                            entry_time.pop(symbol, None)
-                            highest_prices.pop(symbol, None)
+                            # We deliberately DO NOT pop entry_time or highest_prices here.
+                            # If the order fails or gets canceled, we want to retain the hold-time and peak price.
                     else:
                         logger.info(
                             f"📌 Holding {symbol} | Entry: ${fmt_price(avg_entry)} | "
@@ -290,6 +287,11 @@ async def run_trading_mode():
                     continue
 
                 # ── ENTRY ──────────────────────────────────────────────────────
+                # Skip entries if this symbol is on cooldown (e.g. recently sold/bought)
+                if now < cooldown_until.get(symbol, 0.0):
+                    await asyncio.sleep(2)
+                    continue
+
                 # Single source of truth: BUY_SIGNAL (config). EMA50 trend filter
                 # (trend == "up") gates entries so we only buy with the wind at
                 # our back. trend is computed by compute_regime_and_trend() via
