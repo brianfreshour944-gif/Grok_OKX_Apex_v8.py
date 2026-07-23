@@ -316,9 +316,20 @@ async def run_trading_mode():
                         logger.warning(f"⚠️ Orderbook fetch failed for {symbol} — skipping buy to be safe: {e}")
                         _whale_veto = True
 
+                    # ── Sentinel Hard Veto & Volatility Protection Filter ──
+                    if atr_pct > 6.0:
+                        logger.info(f"🛑 BUY skipped {symbol} by Sentinel Veto: Extreme market volatility (ATR={atr_pct:.2f}%)")
+                        await asyncio.sleep(2)
+                        continue
+                    elif regime == "wild" and signal < 0.70:
+                        logger.info(f"🛑 BUY skipped {symbol} by Sentinel Veto: Low conviction in wild market regime (signal={signal:.3f})")
+                        await asyncio.sleep(2)
+                        continue
+
                     if _whale_veto:
                         await asyncio.sleep(2)
                         continue
+
 
                     if not buys_allowed:
                         if swap_weakest_position(symbol, signal, latest_signals):
