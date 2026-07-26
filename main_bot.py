@@ -21,7 +21,7 @@ from config import (
     COOLDOWN_SECONDS_BUY, COOLDOWN_SECONDS_SELL, SLEEP_PER_LOOP,
     get_regime_params, fmt_price, trading_client, SYMBOLS,
 )
-from database import report_equity, init_db
+from database import report_equity, init_db, save_bot_state, load_bot_state
 from data_feeds import get_clean_ohlcv_dataframe, get_orderbook_with_retry
 from regime import compute_regime_and_trend, calculate_adjusted_risk
 from portfolio import (
@@ -37,7 +37,7 @@ from ml_predictor import GrokGQA_Transformer
 import joblib
 
 # ── Global state ───────────────────────────────────────────────────────────────
-cooldown_until: dict = {symbol: 0.0 for symbol in SYMBOLS}
+cooldown_until: dict = {}
 entry_time:     dict = {}
 latest_signals: dict = {}
 highest_prices: dict = {}
@@ -94,10 +94,12 @@ predictor = SafeMLPredictor(MODEL_PATH, SEQUENCE_LEN)
 
 # ── Main trading loop ──────────────────────────────────────────────────────────
 async def run_trading_mode():
-    global start_equity
+    global start_equity, cooldown_until, entry_time, latest_signals, highest_prices
 
-    sync_existing_positions(entry_time)
     init_db()  # create DB tables once at startup (no-op if DATABASE_URL not set)
+    cooldown_until, entry_time, latest_signals, highest_prices = load_bot_state()
+    sync_existing_positions(entry_time)
+
     logger.info("🚀 Grok Apex Ironclad Bot v9 - Cutting Edge Started")
 
     # ── Startup cleanup: close any positions in symbols we no longer trade ──────
@@ -394,6 +396,10 @@ async def run_trading_mode():
                         if open_count >= MAX_OPEN_POSITIONS:
                             logger.info("🔒 Max positions reached — no more buys this cycle.")
                             buys_allowed = False
+            
+            # Save state at the end of each cycle
+            save_bot_state(cooldown_until, entry_time, latest_signals, highest_prices)
+
             # ── --once test flag: exit after first full cycle ──────────────────
             if "--once" in sys.argv:
                 logger.info("🏁 --once flag passed. Cycle complete. Exiting.")

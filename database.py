@@ -4,8 +4,33 @@
 
 import os
 import psycopg2
-from config import logger, BOT_NAME
+import json
+from config import logger, BOT_NAME, SYMBOLS
 
+
+def _init_bot_status_table(cur):
+    """Create bot_status table if it doesn't exist."""
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS bot_status (
+            bot_name TEXT PRIMARY KEY,
+            starting_equity NUMERIC,
+            live_equity NUMERIC,
+            live_equity_updated_at TIMESTAMP,
+            last_update TIMESTAMP
+        )
+    """)
+
+def _init_bot_state_table(cur):
+    """Create bot_state table if it doesn't exist."""
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS bot_state (
+            symbol TEXT PRIMARY KEY,
+            cooldown_until REAL,
+            entry_time REAL,
+            latest_signal REAL,
+            highest_price REAL
+        )
+    """)
 
 def _init_tables(cur):
     """Create required tables if they don't exist. Called once at startup."""
@@ -15,6 +40,21 @@ def _init_tables(cur):
             bot_name  TEXT    NOT NULL,
             equity    NUMERIC NOT NULL,
             timestamp TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS trades (
+            id SERIAL PRIMARY KEY,
+            bot_name TEXT,
+            exchange TEXT,
+            symbol TEXT,
+            side TEXT,
+            price REAL,
+            quantity REAL,
+            value REAL,
+            fee REAL,
+            order_id TEXT,
+            timestamp TIMESTAMP
         )
     """)
 
@@ -31,10 +71,72 @@ def init_db():
         with psycopg2.connect(db_url) as conn:
             with conn.cursor() as cur:
                 _init_tables(cur)
+                _init_bot_status_table(cur)
+                _init_bot_state_table(cur)
             conn.commit()
         logger.info("📘 DB: tables initialised")
     except Exception as e:
         logger.warning(f"⚠️ DB init failed (non-fatal): {e}")
+
+
+def save_bot_state(cooldown_until, entry_time, latest_signals, highest_prices):
+    """Save the bot's state to the database."""
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url:
+        return
+    try:
+        with psycopg2.connect(db_url) as conn:
+            with conn.cursor() as cur:
+                for symbol in SYMBOLS:
+                    cur.execute("""
+                        INSERT INTO bot_state (symbol, cooldown_until, entry_time, latest_signal, highest_price)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (symbol) DO UPDATE SET
+                            cooldown_until = EXCLUDED.cooldown_until,
+                            entry_time = EXCLUDED.entry_time,
+                            latest_signal = EXCLUDED.latest_signal,
+                            highest_price = EXCLUDED.highest_price
+                    """, (
+                        symbol,
+                        cooldown_until.get(symbol),
+                        entry_time.get(symbol),
+                        latest_signals.get(symbol),
+                        highest_prices.get(symbol)
+                    ))
+            conn.commit()
+    except Exception as e:
+        logger.error(f"DB Error saving bot state: {e}")
+
+def load_bot_state():
+    """Load the bot's state from the database."""
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url:
+        return {}, {}, {}, {}
+    
+    cooldown_until = {}
+    entry_time = {}
+    latest_signals = {}
+    highest_prices = {}
+
+    try:
+        with psycopg2.connect(db_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT symbol, cooldown_until, entry_time, latest_signal, highest_price FROM bot_state")
+                for row in cur.fetchall():
+                    symbol, cd, et, ls, hp = row
+                    if cd is not None:
+                        cooldown_until[symbol] = cd
+                    if et is not None:
+                        entry_time[symbol] = et
+                    if ls is not None:
+                        latest_signals[symbol] = ls
+                    if hp is not None:
+                        highest_prices[symbol] = hp
+        logger.info("📘 DB: Bot state loaded from database.")
+    except Exception as e:
+        logger.error(f"DB Error loading bot state: {e}")
+    
+    return cooldown_until, entry_time, latest_signals, highest_prices
 
 
 def record_trade(bot_name, symbol, side, qty, price, pnl_pct=None, order_id=None):
