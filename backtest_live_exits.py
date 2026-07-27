@@ -3,19 +3,12 @@ import pandas as pd
 from datetime import datetime, timedelta, timezone
 from alpaca.data.requests import CryptoBarsRequest
 from alpaca.data.timeframe import TimeFrame
-from config import data_client, SEQUENCE_LEN
+from config import data_client, SEQUENCE_LEN, PROFIT_TARGET_PCT, STOP_LOSS_PCT, MAX_HOLD_HOURS, MIN_HOLD_HOURS_BEFORE_SIGNAL, BUY_SIGNAL, SELL_SIGNAL
 import os
 import torch
 import joblib
 import numpy as np
 
-# Live bot config values
-PROFIT_TARGET_PCT = 0.02
-STOP_LOSS_PCT = 0.03
-MAX_HOLD_HOURS = 4.0
-MIN_HOLD_HOURS_BEFORE_SIGNAL = 0.5
-BUY_SIGNAL = 0.51
-SELL_SIGNAL = 0.45
 
 def get_full_day_5m(bars_slice):
     if len(bars_slice) == 0:
