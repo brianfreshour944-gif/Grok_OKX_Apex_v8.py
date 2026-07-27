@@ -6,7 +6,8 @@ __pycache__/
 *.pth
 
 # Data
-*.csv # If you don't want to commit historical_data.csv, uncomment this
+# If you don't want to commit historical_data.csv, uncomment the line below
+*.csv
 
 # Environment data
 .env

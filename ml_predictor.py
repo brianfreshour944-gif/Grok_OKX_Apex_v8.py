@@ -106,10 +106,13 @@ class SafeMLPredictor:
         ).to(self.device)
 
         try:
-            self.model.load_state_dict(torch.load(model_path, map_location=self.device), strict=False)
+            self.model.load_state_dict(torch.load(model_path, map_location=self.device), strict=True)
             print(f"✅ Model weights loaded from {model_path}")
         except Exception as e:
-            print(f"⚠️ Warning loading state dict: {e}")
+            # Fail loudly rather than silently continuing with a partially-
+            # initialized (effectively random-weight) model.
+            print(f"❌ Model state dict load failed: {e}")
+            raise
 
         self.seq_len = seq_len
 
@@ -139,8 +142,13 @@ class SafeMLPredictor:
                 print(f"⚠️  Need {self.seq_len} bars, only {len(data)} available.")
                 return 0.5
 
+            # Guard against any NaN/inf sneaking through before scaling.
+            data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
+            data = np.clip(data, -1e6, 1e6)
+
             if self.scaler is not None:
                 data = self.scaler.transform(data).astype(np.float32)
+                data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
 
             x = torch.tensor(data).unsqueeze(0).to(self.device)  # (1, seq_len, n_features)
 

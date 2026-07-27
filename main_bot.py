@@ -33,10 +33,10 @@ from portfolio import (
 from orders import place_order
 from feature_engineering import add_features, FEATURE_COLS
 from notifications import send_discord_alert
-from ml_predictor import GrokGQA_Transformer
+from ml_predictor import SafeMLPredictor
 import joblib
 
-# ── Global state ───────────────────────────────────────────────────────────────
+# --- Global state ---
 cooldown_until: dict = {}
 entry_time:     dict = {}
 latest_signals: dict = {}
@@ -44,51 +44,12 @@ highest_prices: dict = {}
 start_equity         = None
 
 
-class SafeMLPredictor:
-    def __init__(self, model_path, seq_len=32):
-        self.device  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.seq_len = seq_len
-        self.model   = GrokGQA_Transformer(
-            input_dim=len(FEATURE_COLS), seq_len=seq_len,
-            embed_dim=128, num_layers=4, num_q_heads=8, num_kv_heads=2, dropout=0.1,
-        ).to(self.device)
-        state = torch.load(model_path, map_location=self.device)
-        self.model.load_state_dict(state, strict=False)
-        self.model.eval()
-        scaler_path  = os.path.join(os.path.dirname(model_path), "feature_scaler.pkl")
-        self.scaler  = joblib.load(scaler_path) if os.path.exists(scaler_path) else None
+# NOTE: previously this file had its own duplicate SafeMLPredictor class,
+# separate from the one in ml_predictor.py. Consolidated to one source of
+# truth so the live bot and diagnostic/backtest tooling can't silently
+# drift apart.
 
-    def predict(self, df) -> float:
-        try:
-            df_feat = add_features(df.copy())
-            data    = df_feat.tail(self.seq_len).values.astype(np.float32)
-            if len(data) < self.seq_len:
-                return 0.5
-            data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
-            data = np.clip(data, -1e6, 1e6)
-            if self.scaler:
-                data = self.scaler.transform(data).astype(np.float32)
-                data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
-            x = torch.tensor(data).unsqueeze(0).to(self.device)
-            with torch.no_grad():
-                raw_logit = self.model(x)
-                # BUGFIX: GrokGQA_Transformer.forward() returns RAW LOGITS
-                # (see ml_predictor.py comment "raw logits, no sigmoid"). This
-                # method was returning the raw logit directly and comparing it
-                # against probability-scale thresholds (buy_signal=0.58-0.68,
-                # sell_signal=0.42-0.47) in main_bot.py — a logit is centered
-                # around 0 (typical range ~-3..+3), so it would almost NEVER
-                # cross a 0.6+ threshold. This is why the bot found 18 assets
-                # every cycle but bought exactly zero of them, permanently.
-                prob = torch.sigmoid(raw_logit).item()
-                return float(prob)
-        except Exception as e:
-            logger.error(f"Prediction error: {e}", exc_info=True)
-            return 0.5
-
-
-
-predictor = SafeMLPredictor(MODEL_PATH, SEQUENCE_LEN)
+predictor = SafeMLPredictor(model_path=MODEL_PATH, seq_len=SEQUENCE_LEN)
 
 
 
