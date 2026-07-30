@@ -352,6 +352,7 @@ async def run_trading_mode():
                         ))
                         cooldown_until[symbol]   = now + COOLDOWN_SECONDS_BUY
                         entry_time[symbol]        = now
+                        highest_prices[symbol]    = price
                         running_portfolio_value  += trade_value
                         open_count               += 1
                         if open_count >= MAX_OPEN_POSITIONS:

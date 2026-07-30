@@ -29,28 +29,40 @@ def compute_regime_and_trend(df: pd.DataFrame):
         price   = close.iloc[-1]
         atr_pct = (atr / price) * 100 if price > 0 else 0.0
 
+        # Guard: NaN atr_pct (e.g. fewer than 14 bars available) would
+        # silently pass every comparison below as False -- landing in the
+        # "quiet" branch and, via calculate_adjusted_risk's own NaN
+        # comparison, skipping volatility-based risk scaling entirely
+        # (full position size used exactly when data quality is worst).
+        # Fail safe the same way the except block below already does,
+        # rather than let an invalid measurement produce a confident-
+        # looking regime classification.
+        if pd.isna(atr_pct):
+            logger.warning("regime calc: NaN atr_pct (insufficient bars) -- defaulting to normal/neutral")
+            return "normal", "neutral", 2.0
+
         # Volatility-Adjusted Moving Average (VAMA)
         # We adapt the EMA window length dynamically. Base span is 50.
         # High volatility = shorter span (fast reaction to breakouts)
         # Low volatility  = longer span (avoids whipsaw in sideways markets)
         base_span = 50
-        baseline_vol = 1.5  # Typical crypto ATR% 
-        
+        baseline_vol = 1.5  # Typical crypto ATR%
+
         if atr_pct > 0:
             vol_ratio = atr_pct / baseline_vol
             vol_ratio = max(0.5, min(vol_ratio, 5.0))  # Clamp between 0.5x and 5.0x
             dynamic_span = max(10, int(base_span / vol_ratio))
         else:
             dynamic_span = base_span
-            
+
         adaptive_ma = close.ewm(span=dynamic_span).mean().iloc[-1]
-        
+
         trend  = "up"    if price > adaptive_ma else "down"
         regime = "wild"  if atr_pct > 4.0 else "normal" if atr_pct > 2.0 else "quiet"
         return regime, trend, round(atr_pct, 2)
 
     except Exception as exc:
-        logger.error(f"⚠️ regime calc failed ({type(exc).__name__}: {exc}) — defaulting to normal/neutral")
+        logger.error(f"regime calc failed ({type(exc).__name__}: {exc}) -- defaulting to normal/neutral")
         return "normal", "neutral", 2.0
 
 
@@ -61,12 +73,12 @@ def calculate_adjusted_risk(equity: float, atr_pct: float) -> float:
 
     atr_pct is already expressed as a percentage number (e.g. 9.0 = 9%).
     """
-    baseline_vol = 1.5   # % — matches atr_pct scale
+    baseline_vol = 1.5   # % -- matches atr_pct scale
     if atr_pct > baseline_vol and atr_pct > 0:
         vol_scaler = baseline_vol / atr_pct
         adjusted   = equity * BASE_RISK_PERCENT * vol_scaler
         logger.info(
-            f"⚠️ High volatility (ATR%={atr_pct:.2f}%) — "
+            f"High volatility (ATR%={atr_pct:.2f}%) -- "
             f"scaling risk by {vol_scaler:.2f}x"
         )
     else:
