@@ -2,7 +2,7 @@ import asyncio
 import pandas as pd
 from datetime import datetime, timedelta, timezone
 from alpaca.data.requests import CryptoBarsRequest
-from alpaca.data.timeframe import TimeFrame
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from config import data_client, SEQUENCE_LEN, PROFIT_TARGET_PCT, STOP_LOSS_PCT, MAX_HOLD_HOURS, MIN_HOLD_HOURS_BEFORE_SIGNAL, BUY_SIGNAL, SELL_SIGNAL
 import os
 import torch
@@ -10,7 +10,14 @@ import joblib
 import numpy as np
 
 
-def get_full_day_5m(bars_slice):
+def get_full_day_native(bars_slice):
+    """
+    Builds a feature-ready dataframe directly from NATIVE 15-minute bars
+    (no resampling). This MUST match data_feeds.py's get_clean_ohlcv_dataframe()
+    and train_transformer.py's BAR_TIMEFRAME — feeding the model 5-min
+    resampled bars instead of native 15-min bars puts every feature
+    out-of-distribution relative to training.
+    """
     if len(bars_slice) == 0:
         return None
         
@@ -29,24 +36,10 @@ def get_full_day_5m(bars_slice):
     if df.index.tz is not None:
         df.index = df.index.tz_localize(None)
 
-    df["vwap_x_vol"] = df["vwap"] * df["volume"]
-    df_5m = df.resample("5min").agg({
-        "open":        "first",
-        "high":        "max",
-        "low":         "min",
-        "close":       "last",
-        "volume":      "sum",
-        "vwap_x_vol":  "sum",
-        "trade_count": "sum",
-    }).fillna(0)
-
-    df_5m["vwap"] = (
-        df_5m["vwap_x_vol"] / df_5m["volume"].replace(0, float("nan"))
-    ).fillna(df_5m["close"])
-    df_5m.drop(columns=["vwap_x_vol"], inplace=True)
-
-    df_5m = df_5m[df_5m["close"] > 0]
-    return df_5m
+    # Where Alpaca returned vwap=0 (rare empty bars), fall back to close
+    df["vwap"] = df["vwap"].where(df["vwap"] > 0, df["close"])
+    df = df[df["close"] > 0]
+    return df
 
 async def main():
     symbols = ["BTC/USD", "ETH/USD", "AAVE/USD", "LTC/USD", "GRT/USD", "BAT/USD"]
@@ -56,13 +49,17 @@ async def main():
     end_time = datetime(2026, 7, 19, 2, 0, tzinfo=timezone.utc)
     
     print("Fetching data...")
-    all_data_5m = {}
+    all_data_native = {}
     for sym in symbols:
-        req = CryptoBarsRequest(symbol_or_symbols=sym, timeframe=TimeFrame.Minute, start=start_time, end=end_time)
+        req = CryptoBarsRequest(
+            symbol_or_symbols=sym,
+            timeframe=TimeFrame(15, TimeFrameUnit.Minute),
+            start=start_time, end=end_time,
+        )
         bars = data_client.get_crypto_bars(req).data.get(sym, [])
-        df_5m = get_full_day_5m(bars)
-        if df_5m is not None:
-            all_data_5m[sym] = df_5m
+        df_native = get_full_day_native(bars)
+        if df_native is not None:
+            all_data_native[sym] = df_native
 
     from feature_engineering import add_features, FEATURE_COLS
     from ml_predictor import GrokGQA_Transformer
@@ -83,19 +80,19 @@ async def main():
     eval_start = datetime(2026, 7, 18, 13, 50, 0)
     
     for sym in symbols:
-        df_5m = all_data_5m.get(sym)
-        if df_5m is None: continue
+        df_native = all_data_native.get(sym)
+        if df_native is None: continue
         
         signals = []
         prices = []
         timestamps = []
         
-        for i in range(len(df_5m)):
-            current_time = df_5m.index[i]
+        for i in range(len(df_native)):
+            current_time = df_native.index[i]
             if current_time < eval_start:
                 continue
                 
-            sub_df = df_5m.iloc[:i+1]
+            sub_df = df_native.iloc[:i+1]
             if len(sub_df) < SEQUENCE_LEN:
                 continue
                 

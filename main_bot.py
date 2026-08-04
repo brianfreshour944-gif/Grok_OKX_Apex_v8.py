@@ -114,15 +114,31 @@ async def run_trading_mode():
             
             account      = trading_client.get_account()
             equity       = float(account.equity)
-            if start_equity is None:
+            # Guard: never pin start_equity to 0.0. If equity is ever
+            # reported as 0 (bad API response, zero-balance account, etc.)
+            # a naive `if start_equity is None: start_equity = equity` would
+            # permanently lock start_equity at 0.0, causing
+            # (equity - start_equity) / start_equity to raise
+            # ZeroDivisionError EVERY cycle forever — an unrecoverable
+            # crash-loop that looks like a transient error in the logs.
+            # Instead, skip the drawdown check entirely on cycles where we
+            # don't yet have a valid (>0) baseline equity to compare against.
+            if start_equity is None and equity > 0:
                 start_equity = equity
 
             report_equity(BOT_NAME, equity)
 
-            drawdown = (equity - start_equity) / start_equity * 100
-            if drawdown < MAX_DRAWDOWN_STOP:
-                logger.error("🚨 MAX DRAWDOWN HIT - Stopping trading")
-                break
+            drawdown = None
+            if not start_equity:
+                logger.warning(
+                    f"⚠️ No valid starting equity yet (equity=${equity:.2f}) — "
+                    f"skipping drawdown check this cycle."
+                )
+            else:
+                drawdown = (equity - start_equity) / start_equity * 100
+                if drawdown < MAX_DRAWDOWN_STOP:
+                    logger.error("🚨 MAX DRAWDOWN HIT - Stopping trading")
+                    break
 
             current_positions   = get_all_positions()
             # Exclude true dust (< MIN_POSITION_USD) from open_count so they
@@ -132,10 +148,11 @@ async def run_trading_mode():
             buying_power        = get_buying_power()
             max_portfolio_value = equity * BASE_RISK_PERCENT * MAX_OPEN_POSITIONS
 
+            drawdown_str = f"{drawdown:.2f}%" if drawdown is not None else "N/A"
             logger.info(
                 f"📊 Cycle | Positions: {open_count}/{MAX_OPEN_POSITIONS} | "
                 f"Value: ${total_value:.2f} | BP: ${buying_power:.2f} | "
-                f"Drawdown: {drawdown:.2f}% | Portfolio cap: ${max_portfolio_value:.2f}"
+                f"Drawdown: {drawdown_str} | Portfolio cap: ${max_portfolio_value:.2f}"
             )
 
             buys_allowed            = True
@@ -297,10 +314,18 @@ async def run_trading_mode():
 
 
                     if not buys_allowed:
-                        if swap_weakest_position(symbol, signal, latest_signals):
+                        sold_notional = swap_weakest_position(symbol, signal, latest_signals)
+                        if sold_notional > 0:
                             logger.info(f"✅ Swapped weak position to make room for {symbol}. Proceeding with buy.")
                             buys_allowed = True
                             open_count = max(0, open_count - 1)
+                            # The swap just freed up dollar-value headroom too —
+                            # without this, running_portfolio_value stays stale
+                            # (still counting the just-sold position's value),
+                            # which could wrongly re-block the very buy the
+                            # swap was meant to enable via the headroom check
+                            # further down.
+                            running_portfolio_value = max(0.0, running_portfolio_value - sold_notional)
                         else:
                             logger.info(f"🚫 BUY suppressed for {symbol} (cap/position limit and no weak swap found)")
                             await asyncio.sleep(2)

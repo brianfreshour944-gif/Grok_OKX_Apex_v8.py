@@ -7,5 +7,6 @@ scikit-learn==1.6.1
 alpaca-py==0.33.0
 psycopg2-binary
 aiohttp
+python-dotenv  # used by backtest_exact.py, shadow_data_collector.py, scripts/test_ws.py
 pytz  # required by alpaca-py internally
 websockets<=13.1  # pinned: alpaca-py streaming breaks on websockets>=14

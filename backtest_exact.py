@@ -9,7 +9,7 @@ import numpy as np
 
 from alpaca.data.historical import CryptoHistoricalDataClient
 from alpaca.data.requests import CryptoBarsRequest
-from alpaca.data.timeframe import TimeFrame
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from ml_predictor import GrokGQA_Transformer, FEATURE_COLS
 import joblib
 
@@ -41,9 +41,9 @@ class SafeMLPredictor:
             input_dim=len(FEATURE_COLS),
             seq_len=seq_len,
             embed_dim=128,
-            num_layers=8,
-            num_q_heads=16,
-            num_kv_heads=4,
+            num_layers=4,
+            num_q_heads=8,
+            num_kv_heads=2,
             dropout=0.1
         ).to(self.device)
         state = torch.load(model_path, map_location=self.device)
@@ -63,11 +63,18 @@ class SafeMLPredictor:
                 data = self.scaler.transform(data).astype(np.float32)
                 data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
             x = torch.tensor(data).unsqueeze(0).to(self.device)
-            with torch.no_grad(): return float(self.model(x).item())
+            with torch.no_grad(): return float(torch.sigmoid(self.model(x)).item())
         except Exception:
             return 0.5
 
 def emulate_clean_ohlcv(bars_slice):
+    """
+    Builds a feature-ready dataframe directly from NATIVE 15-minute bars
+    (no resampling). This MUST match data_feeds.py's get_clean_ohlcv_dataframe()
+    and train_transformer.py's BAR_TIMEFRAME (TimeFrame(15, TimeFrameUnit.Minute)) —
+    feeding the model 5-min resampled bars instead of native 15-min bars puts
+    every feature out-of-distribution relative to training.
+    """
     if len(bars_slice) == 0: return None
     df = pd.DataFrame([{
         "timestamp":   b.timestamp,
@@ -78,20 +85,15 @@ def emulate_clean_ohlcv(bars_slice):
         "volume":      float(b.volume or 0),
         "vwap":        float(b.vwap or 0),
         "trade_count": float(b.trade_count or 0),
-    } for b in bars_slice[-600:]])
+    } for b in bars_slice[-SEQUENCE_LEN * 4:]])
     df.set_index("timestamp", inplace=True)
     if df.index.tz is not None:
         df.index = df.index.tz_localize(None)
-    df["vwap_x_vol"] = df["vwap"] * df["volume"]
-    df_5m = df.resample("5min").agg({
-        "open": "first", "high": "max", "low": "min", "close": "last",
-        "volume": "sum", "vwap_x_vol": "sum", "trade_count": "sum",
-    }).fillna(0)
-    df_5m["vwap"] = (df_5m["vwap_x_vol"] / df_5m["volume"].replace(0, float("nan"))).fillna(df_5m["close"])
-    df_5m.drop(columns=["vwap_x_vol"], inplace=True)
-    df_5m = df_5m[df_5m["close"] > 0]
-    if len(df_5m) < SEQUENCE_LEN: return None
-    return df_5m.tail(SEQUENCE_LEN)
+    # Where Alpaca returned vwap=0 (rare empty bars), fall back to close
+    df["vwap"] = df["vwap"].where(df["vwap"] > 0, df["close"])
+    df = df[df["close"] > 0]
+    if len(df) < SEQUENCE_LEN: return None
+    return df.tail(SEQUENCE_LEN)
 
 def compute_regime_and_trend(df):
     try:
@@ -136,10 +138,14 @@ async def main():
     print("Fetching historical data...")
     all_data = {}
     for sym in symbols:
-        req = CryptoBarsRequest(symbol_or_symbols=sym, timeframe=TimeFrame.Minute, start=start_time, end=end_time)
+        req = CryptoBarsRequest(
+            symbol_or_symbols=sym,
+            timeframe=TimeFrame(15, TimeFrameUnit.Minute),
+            start=start_time, end=end_time,
+        )
         bars = data_client.get_crypto_bars(req).data.get(sym, [])
         all_data[sym] = bars
-        print(f"{sym}: {len(bars)} 1-minute bars fetched.")
+        print(f"{sym}: {len(bars)} native 15-minute bars fetched.")
 
     predictor = SafeMLPredictor("grok_gqa_v9_best.pth", 32)
     BUY_SIGNAL = 0.51
@@ -188,7 +194,7 @@ async def main():
                         print(f"[{current_time.strftime('%H:%M')}] BUY  {sym}: Signal={signal:.4f}, VAMA={trend}, KellyMult={kelly_mult:.2f}, Size=${trade_value:.2f}")
                         positions[sym] = {'entry_price': price, 'highest_seen': price}
                         
-        current_time += timedelta(minutes=5)
+        current_time += timedelta(minutes=15)
         
     print(f"\nFinal Simulated Equity: ${equity:.2f}")
 

@@ -117,20 +117,26 @@ def sync_existing_positions(entry_time: dict) -> None:
                 break
 
 
-def swap_weakest_position(new_symbol: str, new_signal: float, latest_signals: dict, threshold: float = 0.05) -> bool:
+def swap_weakest_position(new_symbol: str, new_signal: float, latest_signals: dict, threshold: float = 0.05) -> float:
     """
     Evaluates currently open positions. If there's a held position with a signal significantly 
-    weaker than the new_signal, it force-sells that position to free up capital and returns True.
+    weaker than the new_signal, it force-sells that position to free up capital.
+
+    Returns the market value (USD notional) of the position sold, so callers can
+    decrement their own running portfolio-value tracking accordingly. Returns
+    0.0 if no swap was executed (nothing to swap, threshold not met, or the
+    sell order failed).
     """
     try:
         positions = get_all_positions()
         if not positions:
-            return False
+            return 0.0
 
         weakest_sym = None
         weakest_signal = float('inf')
         weakest_qty = 0.0
         weakest_price = 0.0
+        weakest_value = 0.0
 
         for alpaca_sym, p_data in positions.items():
             # Reverse map from alpaca_sym to standard symbol
@@ -146,6 +152,7 @@ def swap_weakest_position(new_symbol: str, new_signal: float, latest_signals: di
                 weakest_sym = alpaca_sym
                 weakest_qty = p_data['qty']
                 weakest_price = p_data['current_price']
+                weakest_value = p_data['market_value']
 
         if weakest_sym and (new_signal - weakest_signal) >= threshold:
             logger.warning(
@@ -165,15 +172,15 @@ def swap_weakest_position(new_symbol: str, new_signal: float, latest_signals: di
                         limit_price=float(weakest_price)
                     )
                 )
-                return True
+                return float(weakest_value)
             except Exception as e:
                 logger.error(f"Failed to execute swap sell for {weakest_sym}: {e}")
-                return False
+                return 0.0
 
     except Exception as e:
         logger.error(f"swap_weakest_position failed: {e}")
         
-    return False
+    return 0.0
 
 def cancel_stale_orders(timeout_minutes=3):
     """
