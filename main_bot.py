@@ -38,6 +38,7 @@ from orders import place_order
 from feature_engineering import add_features, FEATURE_COLS
 from notifications import send_discord_alert
 from ml_predictor import SafeMLPredictor
+from money import to_dec, mul, div, safe_pct_change, weighted_avg, pnl_dollar, pnl_pct, qty as money_qty, money
 import joblib
 
 # --- Global state ---
@@ -64,7 +65,16 @@ async def run_trading_mode():
     init_db()  # create DB tables once at startup (no-op if DATABASE_URL not set)
     cooldown_until, entry_time, latest_signals, highest_prices = load_bot_state()
     sync_existing_positions(entry_time, highest_prices)
-
+    
+    # ── Startup: cancel any stale unfilled orders left over from a crash ──────────
+    # If the bot placed a limit order then crashed before recording the fill,
+    # those orders are still open on the exchange. This prevents them from
+    # locking buying power or causing duplicate fills on restart.
+    try:
+        await cancel_stale_orders_async(timeout_minutes=3)
+    except Exception as e:
+        logger.warning(f"⚠️  Startup cancel_stale_orders failed (non-fatal): {e}")
+    
     logger.info("🚀 Grok Apex Ironclad Bot v9 - Cutting Edge Started")
 
     # ── Startup cleanup: close any positions in symbols we no longer trade ──────
@@ -162,19 +172,30 @@ async def run_trading_mode():
             total_value         = sum(p["market_value"] for p in current_positions.values())
             buying_power        = await get_buying_power_async()
             max_portfolio_value = equity * BASE_RISK_PERCENT * MAX_OPEN_POSITIONS
-
+            
+            # running_portfolio_value tracks TOTAL portfolio exposure (position value only),
+            # used for the headroom check against max_portfolio_value.
+            # Note: max_portfolio_value is based on total equity, while position exposure
+            # is only the long positions. The difference represents unused cash/buying power.
+            # This comparison is intentional: we limit position EXPOSURE, not total equity.
+            # However, running_portfolio_value must include cash proceeds from sells
+            # to accurately track how much position value has changed within this cycle.
+            # Starting from total_value (current exchange position values) is correct
+            # because any sells within this cycle will decrement it, and buys will increment it.
+            
             drawdown_str = f"{drawdown:.2f}%" if drawdown is not None else "N/A"
             logger.info(
-                f"📊 Cycle | Positions: {open_count}/{MAX_OPEN_POSITIONS} | "
-                f"Value: ${total_value:.2f} | BP: ${buying_power:.2f} | "
-                f"Drawdown: {drawdown_str} | Portfolio cap: ${max_portfolio_value:.2f}"
+                f"Cycle | Positions: {open_count}/{MAX_OPEN_POSITIONS} | "
+                f"Position Value: ${total_value:.2f} | Cash/BP: ${buying_power:.2f} | "
+                f"Total Equity: ${equity:.2f} | Drawdown: {drawdown_str} | "
+                f"Position Cap: ${max_portfolio_value:.2f}"
             )
 
             buys_allowed            = True
-            running_portfolio_value = total_value
+            running_portfolio_value = total_value  # Position exposure only
 
             if total_value >= max_portfolio_value:
-                logger.warning(f"📉 Portfolio ${total_value:.2f} >= cap ${max_portfolio_value:.2f}")
+                logger.warning(f"Position exposure ${total_value:.2f} >= cap ${max_portfolio_value:.2f} (equity=${equity:.2f})")
                 sell_largest_position()
                 buys_allowed = False
 
@@ -244,7 +265,7 @@ async def run_trading_mode():
 
                 # ── EXIT ───────────────────────────────────────────────────────
                 if has_position:
-                    pnl_pct    = (price - avg_entry) / avg_entry if avg_entry > 0 else 0.0
+                    pnl_pct    = safe_pct_change(avg_entry, price) if avg_entry > 0 else 0.0
                     held_hours = (now - entry_time.get(symbol, now)) / 3600
                     exit_reason = None
                     
@@ -373,9 +394,9 @@ async def run_trading_mode():
                     )
                     
                     adjusted_risk = calculate_adjusted_risk(equity, atr_pct) * position_size_multiplier * kelly_mult
-                    qty           = adjusted_risk / price
-                    trade_value   = min(qty * price, MAX_SINGLE_TRADE_USD)
-                    qty           = trade_value / price
+                    qty           = money_qty(adjusted_risk / price)
+                    trade_value   = min(mul(qty, price), MAX_SINGLE_TRADE_USD)
+                    qty           = div(trade_value, price)
 
                     if trade_value < MIN_ORDER_USD:
                         logger.info(

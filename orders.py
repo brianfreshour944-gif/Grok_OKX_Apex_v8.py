@@ -38,6 +38,9 @@ async def place_order(symbol: str, side: OrderSide, qty: float, price: float = N
     Sell qty is floored to 8 decimal places before submission to prevent
     Alpaca's 'insufficient balance' rejection caused by float64 precision drift.
     Prices are sanitized via Decimal to prevent 'exceeds max precision' errors.
+
+    After submission, fetches the filled order details from the exchange to
+    record actual fill_price and fees, enabling accurate PnL tracking.
     """
     try:
         if side == OrderSide.SELL:
@@ -52,6 +55,7 @@ async def place_order(symbol: str, side: OrderSide, qty: float, price: float = N
                 limit_price=limit_price
             )
         else:
+            qty = math.floor(qty * 1e8) / 1e8  # Floor BUY qty to 8 decimals too
             raw_limit   = price * 1.001 if price else None
             limit_price = _sanitize_price(raw_limit) if raw_limit else None
             order_data  = LimitOrderRequest(
@@ -63,10 +67,38 @@ async def place_order(symbol: str, side: OrderSide, qty: float, price: float = N
             )
 
         order = trading_client.submit_order(order_data=order_data)
-        record_trade(BOT_NAME, symbol, side.value, qty, price, order_id=order.id)
-        logger.info(f"✅ Order submitted: {side.value} {symbol} {qty:.6f} limit={limit_price}")
+        
+        # Fetch actual fill details from exchange for accurate fee/slippage tracking
+        actual_fill_price = None
+        actual_fee = 0.0
+        try:
+            # Try to get filled order details (order may fill immediately or pending)
+            filled_order = trading_client.get_order_by_id(order.id)
+            if hasattr(filled_order, 'filled_avg_price') and filled_order.filled_avg_price:
+                actual_fill_price = float(filled_order.filled_avg_price)
+            if hasattr(filled_order, 'commission') and filled_order.commission:
+                actual_fee = float(filled_order.commission)
+        except Exception as fill_err:
+            logger.warning(f"Could not fetch fill details for order {order.id}: {fill_err}")
+        
+        # Log slippage if fill price differs from expected
+        if actual_fill_price and price:
+            slippage = actual_fill_price - price
+            slippage_pct = (slippage / price) * 100 if price > 0 else 0
+            if abs(slippage_pct) > 0.1:  # Only log significant slippage
+                logger.warning(
+                    f"Slippage: {side.value} {symbol} | "
+                    f"Expected: ${price:.4f} | Actual fill: ${actual_fill_price:.4f} | "
+                    f"Diff: ${slippage:.4f} ({slippage_pct:+.2f}%)"
+                )
+        
+        record_trade(
+            BOT_NAME, symbol, side.value, qty, price,
+            order_id=order.id, fee=actual_fee, fill_price=actual_fill_price
+        )
+        logger.info(f"Order submitted: {side.value} {symbol} {qty:.6f} limit={limit_price} fill={actual_fill_price or 'pending'} fee=${actual_fee:.4f}")
         return True
 
     except Exception as e:
-        logger.error(f"❌ Order failed ({side.value} {symbol} qty={qty:.6f}): {e}")
+        logger.error(f"Order failed ({side.value} {symbol} qty={qty:.6f}): {e}")
         return False

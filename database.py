@@ -53,9 +53,22 @@ def _init_tables(cur):
             quantity REAL,
             value REAL,
             fee REAL,
+            fill_price REAL,
             order_id TEXT,
             timestamp TIMESTAMP
         )
+    """)
+    # Migration: add fill_price column if it doesn't exist (for older DBs)
+    cur.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns 
+                WHERE table_name = 'trades' AND column_name = 'fill_price'
+            ) THEN
+                ALTER TABLE trades ADD COLUMN fill_price REAL;
+            END IF;
+        END $$;
     """)
 
 
@@ -139,25 +152,27 @@ def load_bot_state():
     return cooldown_until, entry_time, latest_signals, highest_prices
 
 
-def record_trade(bot_name, symbol, side, qty, price, pnl_pct=None, order_id=None):
+def record_trade(bot_name, symbol, side, qty, price, pnl_pct=None, order_id=None, fee=0.0, fill_price=None):
     """Log a completed trade to the trades table."""
     db_url = os.getenv("DATABASE_URL")
     if not db_url:
-        logger.debug("DATABASE_URL not set — skipping trade DB log")
+        logger.debug("DATABASE_URL not set - skipping trade DB log")
         return
     try:
         with psycopg2.connect(db_url) as conn:
             with conn.cursor() as cur:
-                value = (price or 0.0) * qty
+                value = (fill_price or price or 0.0) * qty
+                actual_fill_price = fill_price if fill_price else (price or 0.0)
                 cur.execute("""
                     INSERT INTO trades
                         (bot_name, exchange, symbol, side, price, quantity,
-                         value, fee, order_id, timestamp)
-                    VALUES (%s, 'Alpaca', %s, %s, %s, %s, %s, 0, %s, NOW())
+                         value, fee, fill_price, order_id, timestamp)
+                    VALUES (%s, 'Alpaca', %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                 """, (bot_name, symbol, side, price or 0.0, qty, value,
+                      float(fee), float(actual_fill_price),
                       str(order_id) if order_id else None))
             conn.commit()
-        logger.info(f"📘 DB: {side} {symbol} | Qty: {qty:.6f} | Price: {price}")
+            logger.info(f"Recorded trade: {side} {symbol} | Qty: {qty:.6f} | Price: {price} | Fill: {actual_fill_price} | Fee: ${float(fee):.4f}")
     except Exception as e:
         logger.error(f"DB Error: {e}")
 
@@ -169,14 +184,16 @@ def report_equity(bot_name, equity):
         logger.debug("DATABASE_URL not set — skipping equity DB log")
         return False
     try:
+        from decimal import Decimal
+        eq_val = float(Decimal(str(equity)))
         with psycopg2.connect(db_url) as conn:
             with conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO equity_history (bot_name, equity, timestamp)
                     VALUES (%s, %s, NOW())
-                """, (bot_name, float(equity)))
+                """, (bot_name, eq_val))
             conn.commit()
-        logger.debug(f"📊 Equity reported: ${equity:,.2f}")
+        logger.debug(f"Equity reported: ${eq_val:,.2f}")
         return True
     except Exception as e:
         logger.error(f"Equity reporting failed: {e}")

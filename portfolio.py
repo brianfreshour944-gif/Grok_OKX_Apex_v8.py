@@ -134,10 +134,17 @@ def sync_existing_positions(entry_time: dict, highest_prices: dict) -> None:
             if normalize_symbol(sym) == alpaca_sym:
                 if sym not in entry_time:
                     entry_time[sym] = time.time()
+                    logger.info(f"   Seeded entry_time for {sym} (was missing after restart)")
                 if sym not in highest_prices:
-                    highest_prices[sym] = data["avg_entry"]
+                    # Seed highest_prices from current exchange price so the trailing
+                    # stop baseline reflects the actual market price at restart,
+                    # not just the original entry. Using max() ensures we never
+                    # set a peak below current price (which would trigger an
+                    # immediate false trailing-stop sell).
+                    highest_prices[sym] = max(data["avg_entry"], data["current_price"])
+                    logger.info(f"   Seeded highest_prices for {sym} from exchange (price={data['current_price']:.4f})")
                 logger.info(
-                    f"♻️  Restored: {sym} | qty={data['qty']:.6f} | "
+                    f"Renewing: {sym} | qty={data['qty']:.6f} | "
                     f"avg_entry=${data['avg_entry']:.4f}"
                 )
                 break

@@ -2,6 +2,7 @@
 
 import pandas as pd
 from config import logger, BASE_RISK_PERCENT, MAX_SINGLE_TRADE_USD
+from money import to_dec, mul, div
 
 
 def compute_regime_and_trend(df: pd.DataFrame):
@@ -75,13 +76,13 @@ def calculate_adjusted_risk(equity: float, atr_pct: float) -> float:
     """
     baseline_vol = 1.5   # % -- matches atr_pct scale
     if atr_pct > baseline_vol and atr_pct > 0:
-        vol_scaler = baseline_vol / atr_pct
-        adjusted   = equity * BASE_RISK_PERCENT * vol_scaler
+        vol_scaler = div(baseline_vol, atr_pct)
+        adjusted   = mul(mul(equity, BASE_RISK_PERCENT), vol_scaler)
         logger.info(
             f"High volatility (ATR%={atr_pct:.2f}%) -- "
             f"scaling risk by {vol_scaler:.2f}x"
         )
     else:
-        adjusted = equity * BASE_RISK_PERCENT
-
+        adjusted = mul(mul(equity, BASE_RISK_PERCENT), 1.0)
+    
     return min(adjusted, MAX_SINGLE_TRADE_USD)
