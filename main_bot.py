@@ -25,9 +25,9 @@ from database import report_equity, init_db, save_bot_state, load_bot_state
 from data_feeds import get_clean_ohlcv_dataframe, get_orderbook_with_retry
 from regime import compute_regime_and_trend, calculate_adjusted_risk
 from portfolio import (
-    get_all_positions, get_buying_power,
-    sell_largest_position, sync_existing_positions, normalize_symbol,
-    swap_weakest_position, cancel_stale_orders, write_heartbeat,
+    get_all_positions_async, get_buying_power_async,
+    sync_existing_positions, normalize_symbol,
+    swap_weakest_position, cancel_stale_orders_async, write_heartbeat,
     calculate_kelly_multiplier
 )
 from orders import place_order
@@ -59,13 +59,13 @@ async def run_trading_mode():
 
     init_db()  # create DB tables once at startup (no-op if DATABASE_URL not set)
     cooldown_until, entry_time, latest_signals, highest_prices = load_bot_state()
-    sync_existing_positions(entry_time)
+    sync_existing_positions(entry_time, highest_prices)
 
     logger.info("🚀 Grok Apex Ironclad Bot v9 - Cutting Edge Started")
 
     # ── Startup cleanup: close any positions in symbols we no longer trade ──────
     try:
-        all_pos = trading_client.get_all_positions()
+        all_pos = await asyncio.to_thread(trading_client.get_all_positions)
         active_alpaca_syms = {normalize_symbol(s) for s in SYMBOLS}
         for p in all_pos:
             market_val = float(p.market_value)
@@ -74,7 +74,7 @@ async def run_trading_mode():
                     logger.info(f"🧹 Ignoring unsellable dust position {p.symbol} (${market_val:.4f})")
                     continue
                 try:
-                    trading_client.close_position(p.symbol)
+                    await asyncio.to_thread(trading_client.close_position, p.symbol)
                     logger.info(f"🧹 Startup cleanup: closed stale position {p.symbol} (${market_val:.2f})")
                 except Exception as close_err:
                     logger.warning(f"⚠️ Could not close stale position {p.symbol}: {close_err}")
@@ -87,6 +87,17 @@ async def run_trading_mode():
         logger.info("DATABASE_URL not set — skipping starting_equity sync")
     else:
         try:
+            # Fetch current equity once to ensure start_equity is valid before DB sync
+            try:
+                account = await asyncio.to_thread(trading_client.get_account)
+                initial_equity = float(account.equity)
+                if initial_equity > 0:
+                    start_equity = initial_equity
+                else:
+                    logger.warning(f"⚠️ Initial equity from broker is <=0 (${initial_equity:.2f}), using last known start_equity from state")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not fetch initial equity for DB sync: {e}")
+
             with psycopg2.connect(db_url) as conn:
                 with conn.cursor() as cur:
                     cur.execute(
@@ -110,9 +121,9 @@ async def run_trading_mode():
     while True:
         try:
             write_heartbeat()
-            cancel_stale_orders(timeout_minutes=3)
+            await cancel_stale_orders_async(timeout_minutes=3)
             
-            account      = trading_client.get_account()
+            account      = await asyncio.to_thread(trading_client.get_account)
             equity       = float(account.equity)
             # Guard: never pin start_equity to 0.0. If equity is ever
             # reported as 0 (bad API response, zero-balance account, etc.)
@@ -140,12 +151,12 @@ async def run_trading_mode():
                     logger.error("🚨 MAX DRAWDOWN HIT - Stopping trading")
                     break
 
-            current_positions   = get_all_positions()
+            current_positions   = await get_all_positions_async()
             # Exclude true dust (< MIN_POSITION_USD) from open_count so they
             # don't block new entries when they can't be sold anyway.
             open_count          = sum(1 for p in current_positions.values() if p["market_value"] >= MIN_POSITION_USD)
             total_value         = sum(p["market_value"] for p in current_positions.values())
-            buying_power        = get_buying_power()
+            buying_power        = await get_buying_power_async()
             max_portfolio_value = equity * BASE_RISK_PERCENT * MAX_OPEN_POSITIONS
 
             drawdown_str = f"{drawdown:.2f}%" if drawdown is not None else "N/A"
@@ -248,10 +259,14 @@ async def run_trading_mode():
                         logger.info(f"{exit_reason} — SELL {symbol} @ {fmt_price(price)} | Regime: {regime}")
                         success = await place_order(symbol, OrderSide.SELL, qty_held, price)
                         if success:
-                            asyncio.create_task(send_discord_alert(
+                            task = asyncio.create_task(send_discord_alert(
                                 title=f"🔴 SELL {symbol}",
                                 description=f"**Price:** ${price:.4f}\n**Reason:** {exit_reason}\n**Regime:** {regime}",
                                 color=0xFF0000
+                            ))
+                            task.add_done_callback(lambda t: (
+                                logger.error(f"Discord alert failed: {t.exception()}")
+                                if not t.cancelled() and t.exception() else None
                             ))
                             cooldown_until[symbol] = now + COOLDOWN_SECONDS_SELL
                             # We deliberately DO NOT pop entry_time or highest_prices here.
@@ -314,7 +329,9 @@ async def run_trading_mode():
 
 
                     if not buys_allowed:
-                        sold_notional = swap_weakest_position(symbol, signal, latest_signals)
+                        sold_notional = await asyncio.to_thread(
+                            swap_weakest_position, symbol, signal, latest_signals
+                        )
                         if sold_notional > 0:
                             logger.info(f"✅ Swapped weak position to make room for {symbol}. Proceeding with buy.")
                             buys_allowed = True
@@ -370,10 +387,14 @@ async def run_trading_mode():
                     )
                     success = await place_order(symbol, OrderSide.BUY, qty, price)
                     if success:
-                        asyncio.create_task(send_discord_alert(
+                        task = asyncio.create_task(send_discord_alert(
                             title=f"🟢 BUY {symbol}",
                             description=f"**Price:** ${price:.4f}\n**Signal:** {signal:.4f}\n**Size:** ${trade_value:.2f}\n**Regime:** {regime}",
                             color=0x00FF00
+                        ))
+                        task.add_done_callback(lambda t: (
+                            logger.error(f"Discord alert failed: {t.exception()}")
+                            if not t.cancelled() and t.exception() else None
                         ))
                         cooldown_until[symbol]   = now + COOLDOWN_SECONDS_BUY
                         entry_time[symbol]        = now
@@ -386,6 +407,13 @@ async def run_trading_mode():
             
             # Save state at the end of each cycle
             save_bot_state(cooldown_until, entry_time, latest_signals, highest_prices)
+            
+            # Periodic cleanup of stale cooldown entries (older than 1 hour)
+            # to prevent unbounded memory growth from historical cooldown data
+            cutoff = now - 3600  # 1 hour ago
+            for sym in list(cooldown_until.keys()):
+                if cooldown_until[sym] < cutoff:
+                    cooldown_until.pop(sym, None)
 
             # ── --once test flag: exit after first full cycle ──────────────────
             if "--once" in sys.argv:

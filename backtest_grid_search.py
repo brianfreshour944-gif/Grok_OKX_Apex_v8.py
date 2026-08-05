@@ -4,7 +4,6 @@ from datetime import datetime, timedelta, timezone
 from alpaca.data.requests import CryptoBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from config import data_client, SEQUENCE_LEN
-import os
 import torch
 import joblib
 import numpy as np

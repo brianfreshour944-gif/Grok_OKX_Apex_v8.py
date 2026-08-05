@@ -1,5 +1,6 @@
 # portfolio.py — Alpaca position management: fetch, sync, and force-sell helpers.
 
+import asyncio
 import time
 
 from alpaca.trading.requests import LimitOrderRequest
@@ -48,6 +49,16 @@ def get_buying_power() -> float:
         return 0.0
 
 
+async def get_all_positions_async() -> dict:
+    """Async wrapper for get_all_positions to avoid blocking the event loop."""
+    return await asyncio.to_thread(get_all_positions)
+
+
+async def get_buying_power_async() -> float:
+    """Async wrapper for get_buying_power to avoid blocking the event loop."""
+    return await asyncio.to_thread(get_buying_power)
+
+
 def sell_largest_position() -> None:
     """
     Force-sells the largest open position (by market value) when the
@@ -94,13 +105,27 @@ def sell_largest_position() -> None:
         logger.error(f"sell_largest_position failed: {e}")
 
 
-def sync_existing_positions(entry_time: dict) -> None:
+def sync_existing_positions(entry_time: dict, highest_prices: dict) -> None:
     """
-    On startup, populate entry_time for any positions already open in Alpaca.
-    Does not overwrite entries already being tracked.
+    On startup, populate entry_time/highest_prices for positions already open in Alpaca.
+    Also cleans up stale state for symbols that are no longer held.
+    Does not overwrite entries already being tracked for active positions.
     """
     logger.info("🔍 Scanning existing positions on startup...")
     positions = get_all_positions()
+    
+    # Get set of currently held symbols (in Alpaca format)
+    held_alpaca_syms = {normalize_symbol(s) for s in SYMBOLS}
+    current_alpaca_positions = {p.symbol for p in positions.values()} if positions else set()
+    
+    # Clean up stale state for symbols no longer held in Alpaca
+    for sym in list(entry_time.keys()):
+        alpaca_sym = normalize_symbol(sym)
+        if alpaca_sym not in current_alpaca_positions:
+            logger.info(f"🧹 Cleaning up stale state for {sym} (not currently held)")
+            entry_time.pop(sym, None)
+            highest_prices.pop(sym, None)
+    
     if not positions:
         logger.info("No existing positions found.")
         return
@@ -110,6 +135,8 @@ def sync_existing_positions(entry_time: dict) -> None:
             if normalize_symbol(sym) == alpaca_sym:
                 if sym not in entry_time:
                     entry_time[sym] = time.time()
+                if sym not in highest_prices:
+                    highest_prices[sym] = data["avg_entry"]
                 logger.info(
                     f"♻️  Restored: {sym} | qty={data['qty']:.6f} | "
                     f"avg_entry=${data['avg_entry']:.4f}"
@@ -203,6 +230,11 @@ def cancel_stale_orders(timeout_minutes=3):
                 trading_client.cancel_order_by_id(order.id)
     except Exception as e:
         logger.error(f"Failed to cancel stale orders: {e}")
+
+
+async def cancel_stale_orders_async(timeout_minutes=3):
+    """Async wrapper for cancel_stale_orders to avoid blocking the event loop."""
+    await asyncio.to_thread(cancel_stale_orders, timeout_minutes)
 
 def calculate_kelly_multiplier(signal_prob: float, profit_target_pct: float, stop_loss_pct: float) -> float:
     """

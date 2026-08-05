@@ -1,6 +1,7 @@
 # data_feeds.py — Alpaca market data: asset scanner + OHLCV+VWAP fetcher.
 
 import pandas as pd
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 from alpaca.data.requests import CryptoBarsRequest
@@ -15,7 +16,7 @@ async def get_orderbook_with_retry(symbol: str, retries: int = 3, backoff: float
     for attempt in range(retries):
         try:
             req = CryptoLatestOrderbookRequest(symbol_or_symbols=[symbol])
-            return data_client.get_crypto_latest_orderbook(req)[symbol]
+            return await asyncio.to_thread(lambda: data_client.get_crypto_latest_orderbook(req)[symbol])
         except Exception as e:
             logger.warning(f"Orderbook fetch failed for {symbol} (try {attempt+1}/{retries}): {e}")
             if attempt == retries - 1:
@@ -45,7 +46,7 @@ async def scan_stable_assets(limit_scope: int = 35) -> list:
                     timeframe=TimeFrame.Day,
                     start=start_time
                 )
-                bars = data_client.get_crypto_bars(req).data.get(symbol, [])
+                bars = await asyncio.to_thread(lambda: data_client.get_crypto_bars(req).data.get(symbol, []))
                 if bars:
                     day_bar = bars[-1]
                     dollar_volume = float(day_bar.volume) * float(day_bar.close)
@@ -86,7 +87,7 @@ async def get_clean_ohlcv_dataframe(symbol):
             timeframe=TimeFrame(15, TimeFrameUnit.Minute),
             limit=64,
         )
-        bars = data_client.get_crypto_bars(req).data.get(symbol, [])
+        bars = await asyncio.to_thread(lambda: data_client.get_crypto_bars(req).data.get(symbol, []))
         
         # Filter out the current incomplete bar by checking bar CLOSE time
         # (bar timestamp = bar open; a 15-min bar opened at 14:00 closes at 14:15)

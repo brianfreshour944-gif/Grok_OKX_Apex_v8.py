@@ -3,7 +3,7 @@
 import math
 from decimal import Decimal, ROUND_DOWN
 
-from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest
+from alpaca.trading.requests import LimitOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 
 from config import logger, trading_client, BOT_NAME

@@ -11,6 +11,7 @@ from alpaca.data.historical import CryptoHistoricalDataClient
 from alpaca.data.requests import CryptoBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from ml_predictor import GrokGQA_Transformer, FEATURE_COLS
+from config import logger
 import joblib
 
 load_dotenv()
@@ -47,7 +48,14 @@ class SafeMLPredictor:
             dropout=0.1
         ).to(self.device)
         state = torch.load(model_path, map_location=self.device)
-        self.model.load_state_dict(state, strict=False)
+        try:
+            self.model.load_state_dict(state, strict=True)
+        except RuntimeError as e:
+            # Architecture mismatch detected - fail loudly rather than
+            # silently using a partially-loaded (effectively random) model
+            logger.error(f"Model architecture mismatch when loading {model_path}: {e}")
+            logger.error("Ensure backtest_exact.py model config matches the trained model config.")
+            raise
         self.model.eval()
         scaler_path = os.path.join(os.path.dirname(model_path), "feature_scaler.pkl")
         self.scaler = joblib.load(scaler_path) if os.path.exists(scaler_path) else None

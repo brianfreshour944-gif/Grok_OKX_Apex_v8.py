@@ -1,5 +1,4 @@
 import aiohttp
-import asyncio
 from config import logger, DISCORD_WEBHOOK_URL, BOT_NAME
 
 async def send_discord_alert(title: str, description: str, color: int = 0x00FF00):
