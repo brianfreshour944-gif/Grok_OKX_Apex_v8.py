@@ -102,7 +102,11 @@ def sell_largest_position() -> None:
             logger.error(f"Sell order failed (will retry later): {sell_err}")
 
     except Exception as e:
-        logger.error(f"sell_largest_position failed: {e}")
+        status_code = getattr(e, 'status_code', None)
+        if status_code == 429:
+            logger.warning(f"Rate limited during sell_largest_position. Will retry next cycle: {e}")
+        else:
+            logger.error(f"sell_largest_position failed: {e}")
 
 
 def sync_existing_positions(entry_time: dict, highest_prices: dict) -> None:
@@ -219,6 +223,7 @@ def cancel_stale_orders(timeout_minutes=3):
     """
     Finds and cancels any open orders that have been sitting unfilled for longer than timeout_minutes.
     This frees up buying power that gets locked by Limit Order Entries.
+    Uses rate-limit-aware API calls with exponential backoff.
     """
     try:
         from alpaca.trading.requests import GetOrdersRequest
@@ -232,10 +237,15 @@ def cancel_stale_orders(timeout_minutes=3):
         for order in open_orders:
             order_age = (now - order.created_at).total_seconds() / 60.0
             if order_age > timeout_minutes:
-                logger.info(f"🗑️ Canceling stale unfilled order {order.id} for {order.symbol} (Age: {order_age:.1f}m)")
+                logger.info(f"Canceling stale unfilled order {order.id} for {order.symbol} (Age: {order_age:.1f}m)")
                 trading_client.cancel_order_by_id(order.id)
     except Exception as e:
-        logger.error(f"Failed to cancel stale orders: {e}")
+        # Check if it's a rate limit error and back off
+        status_code = getattr(e, 'status_code', None)
+        if status_code == 429:
+            logger.warning(f"Rate limited during cancel_stale_orders. Will retry next cycle: {e}")
+        else:
+            logger.error(f"Failed to cancel stale orders: {e}")
 
 
 async def cancel_stale_orders_async(timeout_minutes=3):

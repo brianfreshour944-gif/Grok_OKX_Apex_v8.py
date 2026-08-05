@@ -8,6 +8,7 @@ from alpaca.trading.enums import OrderSide, TimeInForce
 
 from config import logger, trading_client, BOT_NAME
 from database import record_trade
+from api_utils import call_with_rate_limit_handling_async
 
 
 def _sanitize_price(price: float) -> float:
@@ -66,14 +67,20 @@ async def place_order(symbol: str, side: OrderSide, qty: float, price: float = N
                 limit_price=limit_price
             )
 
-        order = trading_client.submit_order(order_data=order_data)
+        order = await call_with_rate_limit_handling_async(
+            trading_client.submit_order, order_data=order_data,
+            max_retries=5, base_delay=1.0
+        )
         
         # Fetch actual fill details from exchange for accurate fee/slippage tracking
         actual_fill_price = None
         actual_fee = 0.0
         try:
             # Try to get filled order details (order may fill immediately or pending)
-            filled_order = trading_client.get_order_by_id(order.id)
+            filled_order = await call_with_rate_limit_handling_async(
+                trading_client.get_order_by_id, order.id,
+                max_retries=5, base_delay=1.0
+            )
             if hasattr(filled_order, 'filled_avg_price') and filled_order.filled_avg_price:
                 actual_fill_price = float(filled_order.filled_avg_price)
             if hasattr(filled_order, 'commission') and filled_order.commission:
