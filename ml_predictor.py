@@ -131,33 +131,61 @@ class SafeMLPredictor:
     def predict(self, df: pd.DataFrame) -> float:
         """
         Returns a probability in [0, 1].
-        >0.51 → bullish, <0.49 → bearish, ~0.5 → no signal.
+        >0.51 -> bullish, <0.49 -> bearish, ~0.5 -> no signal.
+        """
+        result = self.predict_batch({"single": df})
+        return result.get("single", 0.5)
+
+    def predict_batch(self, df_dict: dict) -> dict:
+        """
+        Batch inference for multiple symbols. Takes a dict of {symbol: df}
+        and returns {symbol: signal} with a single model forward pass.
         """
         try:
-            df = df.copy()
-            df_features = add_features(df)
-            data = df_features[FEATURE_COLS].tail(self.seq_len).values.astype(np.float32)
-
-            if len(data) < self.seq_len:
-                print(f"⚠️  Need {self.seq_len} bars, only {len(data)} available.")
-                return 0.5
-
-            # Guard against any NaN/inf sneaking through before scaling.
-            data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
-            data = np.clip(data, -1e6, 1e6)
-
-            if self.scaler is not None:
-                data = self.scaler.transform(data).astype(np.float32)
+            processed = {}
+            tensors = []
+            symbols_in_order = []
+            
+            for symbol, df in df_dict.items():
+                df = df.copy()
+                df_features = add_features(df)
+                data = df_features[FEATURE_COLS].tail(self.seq_len).values.astype(np.float32)
+                
+                if len(data) < self.seq_len:
+                    processed[symbol] = 0.5
+                    continue
+                
                 data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
-
-            x = torch.tensor(data).unsqueeze(0).to(self.device)  # (1, seq_len, n_features)
-
+                data = np.clip(data, -1e6, 1e6)
+                
+                if self.scaler is not None:
+                    data = self.scaler.transform(data).astype(np.float32)
+                    data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
+                
+                x = torch.tensor(data).unsqueeze(0)
+                tensors.append(x)
+                symbols_in_order.append(symbol)
+            
+            if not tensors:
+                return {s: 0.5 for s in df_dict.keys()}
+            
+            # Stack all tensors for batched inference: (batch_size, seq_len, n_features)
+            batch = torch.cat(tensors, dim=0).to(self.device)
+            
             with torch.no_grad():
-                raw_logits = self.model(x)          # raw logit
-                pred = torch.sigmoid(raw_logits).item()  # <--- FIX: sigmoid here
-
-            return float(pred)
-
+                raw_logits = self.model(batch)  # (batch_size, 1)
+                preds = torch.sigmoid(raw_logits).squeeze(-1)  # (batch_size,)
+            
+            result = {}
+            for symbol in df_dict.keys():
+                if symbol in symbols_in_order:
+                    idx = symbols_in_order.index(symbol)
+                    result[symbol] = float(preds[idx].item())
+                else:
+                    result[symbol] = processed.get(symbol, 0.5)
+            
+            return result
+            
         except Exception as e:
-            print(f"Prediction error: {e}")
-            return 0.5
+            print(f"Batch prediction error: {e}")
+            return {symbol: 0.5 for symbol in df_dict.keys()}

@@ -186,11 +186,29 @@ async def run_trading_mode():
             fetch_tasks = [get_clean_ohlcv_dataframe(sym) for sym in symbols_to_process]
             dfs = await asyncio.gather(*fetch_tasks, return_exceptions=True)
 
+            # ── BATCHED ML INFERENCE: Process all valid symbols in one forward pass ──
+            valid_dataframes = {}
             for symbol, df in zip(symbols_to_process, dfs):
                 if df is None or isinstance(df, Exception):
                     if isinstance(df, Exception):
                         logger.error(f"Failed to fetch data for {symbol}: {df}")
                     continue
+                valid_dataframes[symbol] = df
+
+            # Batch predictions for all valid symbols at once
+            if valid_dataframes:
+                try:
+                    signals = predictor.predict_batch(valid_dataframes)
+                    # Convert single signal to dict if needed
+                    if isinstance(signals, (float, int)):
+                        signals = {list(valid_dataframes.keys())[0]: signals}
+                except Exception as ml_error:
+                    logger.error(f"Batch ML inference failed: {repr(ml_error)}")
+                    signals = {}
+            else:
+                signals = {}
+
+            for symbol, df in valid_dataframes.items():
 
                 alpaca_sym = normalize_symbol(symbol)
 
@@ -198,18 +216,13 @@ async def run_trading_mode():
                 regime_params = get_regime_params(regime)
                 position_size_multiplier = 1.0  # regime_flag removed (was Windows-only path)
 
-                # ── DIAGNOSTIC ML PREDICTION BLOCK ────────────────────────────
-                try:
-                    signal = predictor.predict(df)
-                    latest_signals[symbol] = signal
-                    # FORCE LOG AT INFO LEVEL - this will appear 100%
-                    logger.info(
-                        f"🔬 TEST | Asset: {symbol} | ML Signal: {signal:.4f} | "
-                        f"Threshold: {regime_params['buy_signal']:.4f} (regime={regime}) | Trend: {trend}"
-                    )
-                except Exception as ml_error:
-                    logger.error(f"💥 ML CRASH on {symbol}: {repr(ml_error)}")
-                    continue  # skip this asset and move to the next
+                signal = signals.get(symbol, 0.5)
+                latest_signals[symbol] = signal
+                # FORCE LOG AT INFO LEVEL - this will appear 100%
+                logger.info(
+                    f"🔬 TEST | Asset: {symbol} | ML Signal: {signal:.4f} | "
+                    f"Threshold: {regime_params['buy_signal']:.4f} (regime={regime}) | Trend: {trend}"
+                )
 
                 price                  = df["close"].iloc[-1]
 
