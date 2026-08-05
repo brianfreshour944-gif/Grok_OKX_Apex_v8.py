@@ -7,6 +7,10 @@ import os
 import sys
 import time
 
+# Ensure UTF-8 encoding for stdout/stderr to prevent UnicodeEncodeError on Windows
+sys.stdout.reconfigure(encoding='utf-8')
+sys.stderr.reconfigure(encoding='utf-8')
+
 import numpy as np
 import psycopg2
 import torch

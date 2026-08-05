@@ -114,9 +114,8 @@ def sync_existing_positions(entry_time: dict, highest_prices: dict) -> None:
     logger.info("🔍 Scanning existing positions on startup...")
     positions = get_all_positions()
     
-    # Get set of currently held symbols (in Alpaca format)
-    held_alpaca_syms = {normalize_symbol(s) for s in SYMBOLS}
-    current_alpaca_positions = {p.symbol for p in positions.values()} if positions else set()
+    # Get set of currently held symbols (keys from the positions dict)
+    current_alpaca_positions = set(positions.keys()) if positions else set()
     
     # Clean up stale state for symbols no longer held in Alpaca
     for sym in list(entry_time.keys()):
