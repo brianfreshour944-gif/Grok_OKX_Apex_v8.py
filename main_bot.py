@@ -31,7 +31,7 @@ from regime import compute_regime_and_trend, calculate_adjusted_risk
 from portfolio import (
     get_all_positions_async, get_buying_power_async,
     sync_existing_positions, normalize_symbol,
-    swap_weakest_position, cancel_stale_orders_async, write_heartbeat,
+    swap_weakest_position, sell_largest_position, cancel_stale_orders_async, write_heartbeat,
     calculate_kelly_multiplier
 )
 from orders import place_order
@@ -196,7 +196,7 @@ async def run_trading_mode():
 
             if total_value >= max_portfolio_value:
                 logger.warning(f"Position exposure ${total_value:.2f} >= cap ${max_portfolio_value:.2f} (equity=${equity:.2f})")
-                sell_largest_position()
+                await asyncio.to_thread(sell_largest_position)
                 buys_allowed = False
 
             if open_count >= MAX_OPEN_POSITIONS:
