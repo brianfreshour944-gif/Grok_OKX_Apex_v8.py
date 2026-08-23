@@ -1,3 +1,4 @@
+import sys
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,6 +8,22 @@ import joblib
 import pandas as pd
 
 from feature_engineering import add_features, FEATURE_COLS, FEATURE_DEFAULTS
+
+# This module's own print() calls below use emoji (checkmarks/warnings).
+# main_bot.py reconfigures stdout/stderr to UTF-8 before importing this
+# module, but every diagnostic/backtest script that imports SafeMLPredictor
+# directly (backtest_exact.py, backtest_grid_search.py, backtest_live_exits.py,
+# batch_test.py, latency_scan.py, perf_detail.py, signal_ic_check.py,
+# train_transformer.py) does NOT -- on Windows (or any console using a
+# non-UTF-8 default codepage, e.g. cp1252), that crashes with
+# UnicodeEncodeError at model-load time, before any real work happens.
+# Reconfiguring here, once, at the source of the emoji output, protects every
+# caller regardless of whether it remembered to do this itself.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass  # stream doesn't support reconfigure (e.g. some capture shims) -- non-fatal
 
 
 # ==============================================================================
