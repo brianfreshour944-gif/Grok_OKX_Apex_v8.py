@@ -81,3 +81,75 @@ def test_place_order_still_succeeds_if_fill_lookup_fails(mock_trading_client):
     result = run_async(place_order("BTC/USD", OrderSide.BUY, qty=0.01, price=100.0))
 
     assert result is True
+
+
+# ── Realized PnL pass-through ──
+
+def test_sell_with_avg_entry_and_fill_records_realized_pnl(mock_trading_client, monkeypatch):
+    import orders
+    recorded = {}
+    monkeypatch.setattr(orders, "record_trade", lambda *a, **kw: recorded.update(kw))
+
+    fake_order = MagicMock(id="order-4")
+    mock_trading_client.submit_order.return_value = fake_order
+    mock_trading_client.get_order_by_id.return_value = MagicMock(
+        id="order-4", filled_avg_price="110.0", commission="0.5",
+    )
+
+    result = run_async(place_order("BTC/USD", OrderSide.SELL, qty=2.0, price=109.9, avg_entry=100.0))
+
+    assert result is True
+    assert recorded["realized_pnl"] == pytest.approx(19.5)   # (110-100)*2 - 0.5 fee
+    assert recorded["realized_pnl_pct"] == pytest.approx(0.10)  # 10% vs avg_entry
+
+
+def test_buy_never_records_realized_pnl(mock_trading_client, monkeypatch):
+    import orders
+    recorded = {}
+    monkeypatch.setattr(orders, "record_trade", lambda *a, **kw: recorded.update(kw))
+
+    mock_trading_client.submit_order.return_value = MagicMock(id="order-5")
+    mock_trading_client.get_order_by_id.return_value = MagicMock(
+        id="order-5", filled_avg_price="100.1", commission="0.1",
+    )
+
+    run_async(place_order("BTC/USD", OrderSide.BUY, qty=1.0, price=100.0, avg_entry=95.0))
+
+    assert recorded["realized_pnl"] is None
+    assert recorded["realized_pnl_pct"] is None
+
+
+def test_sell_without_avg_entry_does_not_record_realized_pnl(mock_trading_client, monkeypatch):
+    """swap_weakest_position/sell_largest_position don't go through place_order
+    at all today (a separate known gap), but any SELL that omits avg_entry --
+    e.g. because the caller has no position data -- must not fabricate a
+    realized PnL number rather than silently guessing at one."""
+    import orders
+    recorded = {}
+    monkeypatch.setattr(orders, "record_trade", lambda *a, **kw: recorded.update(kw))
+
+    mock_trading_client.submit_order.return_value = MagicMock(id="order-6")
+    mock_trading_client.get_order_by_id.return_value = MagicMock(
+        id="order-6", filled_avg_price="110.0", commission="0.5",
+    )
+
+    run_async(place_order("BTC/USD", OrderSide.SELL, qty=2.0, price=109.9))  # no avg_entry
+
+    assert recorded["realized_pnl"] is None
+    assert recorded["realized_pnl_pct"] is None
+
+
+def test_sell_without_a_fill_price_does_not_record_realized_pnl(mock_trading_client, monkeypatch):
+    """Must not compute realized PnL against the limit price when the actual
+    fill price is unknown -- that would conflate slippage with PnL."""
+    import orders
+    recorded = {}
+    monkeypatch.setattr(orders, "record_trade", lambda *a, **kw: recorded.update(kw))
+
+    mock_trading_client.submit_order.return_value = MagicMock(id="order-7")
+    mock_trading_client.get_order_by_id.side_effect = RuntimeError("transient")
+
+    run_async(place_order("BTC/USD", OrderSide.SELL, qty=2.0, price=109.9, avg_entry=100.0))
+
+    assert recorded["realized_pnl"] is None
+    assert recorded["realized_pnl_pct"] is None

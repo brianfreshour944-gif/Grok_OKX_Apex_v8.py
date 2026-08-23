@@ -21,6 +21,7 @@ class ExitDecision:
     pnl_pct: float              # fraction, e.g. -0.03 == -3% (NOT x100)
     highest_seen: float         # possibly-updated peak price
     dynamic_sl_pct: float       # fraction, the stop-loss threshold actually applied this cycle
+    trailing_stop_pct: float    # fraction, the trailing-stop distance actually applied this cycle
 
 
 def evaluate_exit(
@@ -31,11 +32,15 @@ def evaluate_exit(
     held_hours: float,
     signal: float,
     regime: str,
+    atr_pct: float,
     profit_target_pct: float,
     stop_loss_pct: float,
     sell_signal: float,
     max_hold_hours: float,
     min_hold_hours_before_signal: float,
+    trailing_stop_atr_multiplier: float,
+    min_trailing_stop_pct: float,
+    max_trailing_stop_pct: float,
 ) -> ExitDecision:
     """
     Decides whether an open position should be exited this cycle.
@@ -65,14 +70,23 @@ def evaluate_exit(
     elif held_hours >= 1.0:
         dynamic_sl_pct = stop_loss_pct * 0.75  # Tighten by 25%
 
+    # Trailing stop distance scales with realized volatility (ATR%) instead
+    # of a fixed 1%: wider in genuinely volatile markets (room to breathe),
+    # tighter in genuinely quiet ones, clamped so it never gets so tight it
+    # chops out of a winner on noise, nor so wide it gives back most of a move.
+    trailing_stop_pct = max(
+        min_trailing_stop_pct,
+        min((atr_pct / 100.0) * trailing_stop_atr_multiplier, max_trailing_stop_pct),
+    )
+
     exit_reason = None
 
     if highest_seen > avg_entry * (1 + profit_target_pct):
-        # Trailing Mode Active (1% trailing stop from peak)
-        trailing_stop_price = highest_seen * 0.99
+        trailing_stop_price = highest_seen * (1 - trailing_stop_pct)
         if price <= trailing_stop_price:
             exit_reason = (
                 f"📉 Trailing Stop triggered (Peak: ${fmt_price(highest_seen)}, "
+                f"Stop: {trailing_stop_pct*100:.2f}% off peak, "
                 f"PnL: {pnl_pct*100:.2f}%) [{regime}]"
             )
     elif pnl_pct <= -dynamic_sl_pct:
@@ -90,4 +104,5 @@ def evaluate_exit(
         pnl_pct=pnl_pct,
         highest_seen=highest_seen,
         dynamic_sl_pct=dynamic_sl_pct,
+        trailing_stop_pct=trailing_stop_pct,
     )

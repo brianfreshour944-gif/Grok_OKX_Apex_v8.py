@@ -63,10 +63,30 @@ def _init_tables(cur):
         DO $$
         BEGIN
             IF NOT EXISTS (
-                SELECT 1 FROM information_schema.columns 
+                SELECT 1 FROM information_schema.columns
                 WHERE table_name = 'trades' AND column_name = 'fill_price'
             ) THEN
                 ALTER TABLE trades ADD COLUMN fill_price REAL;
+            END IF;
+        END $$;
+    """)
+    # Migration: add realized_pnl / realized_pnl_pct columns if they don't exist.
+    # Only populated on SELL rows (net of fees) -- NULL on BUY rows and on SELLs
+    # where the caller didn't have an avg_entry to compute against.
+    cur.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'trades' AND column_name = 'realized_pnl'
+            ) THEN
+                ALTER TABLE trades ADD COLUMN realized_pnl REAL;
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'trades' AND column_name = 'realized_pnl_pct'
+            ) THEN
+                ALTER TABLE trades ADD COLUMN realized_pnl_pct REAL;
             END IF;
         END $$;
     """)
@@ -152,8 +172,15 @@ def load_bot_state():
     return cooldown_until, entry_time, latest_signals, highest_prices
 
 
-def record_trade(bot_name, symbol, side, qty, price, pnl_pct=None, order_id=None, fee=0.0, fill_price=None):
-    """Log a completed trade to the trades table."""
+def record_trade(bot_name, symbol, side, qty, price, order_id=None, fee=0.0, fill_price=None,
+                  realized_pnl=None, realized_pnl_pct=None):
+    """
+    Log a completed trade to the trades table.
+
+    realized_pnl / realized_pnl_pct are only meaningful for SELL rows that
+    close out a position against a known avg_entry (see orders.py); they are
+    left NULL for BUY rows and for SELLs where no avg_entry was available.
+    """
     db_url = os.getenv("DATABASE_URL")
     if not db_url:
         logger.debug("DATABASE_URL not set - skipping trade DB log")
@@ -166,15 +193,47 @@ def record_trade(bot_name, symbol, side, qty, price, pnl_pct=None, order_id=None
                 cur.execute("""
                     INSERT INTO trades
                         (bot_name, exchange, symbol, side, price, quantity,
-                         value, fee, fill_price, order_id, timestamp)
-                    VALUES (%s, 'Alpaca', %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                         value, fee, fill_price, order_id, realized_pnl, realized_pnl_pct, timestamp)
+                    VALUES (%s, 'Alpaca', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                 """, (bot_name, symbol, side, price or 0.0, qty, value,
                       float(fee), float(actual_fill_price),
-                      str(order_id) if order_id else None))
+                      str(order_id) if order_id else None,
+                      float(realized_pnl) if realized_pnl is not None else None,
+                      float(realized_pnl_pct) if realized_pnl_pct is not None else None))
             conn.commit()
-            logger.info(f"Recorded trade: {side} {symbol} | Qty: {qty:.6f} | Price: {price} | Fill: {actual_fill_price} | Fee: ${float(fee):.4f}")
+            pnl_str = f" | Realized PnL: ${realized_pnl:.2f}" if realized_pnl is not None else ""
+            logger.info(f"Recorded trade: {side} {symbol} | Qty: {qty:.6f} | Price: {price} | Fill: {actual_fill_price} | Fee: ${float(fee):.4f}{pnl_str}")
     except Exception as e:
         logger.error(f"DB Error: {e}")
+
+
+def get_realized_pnl_summary(bot_name):
+    """
+    Returns {'total_realized_pnl': float, 'total_fees': float, 'closed_trades': int}
+    summed across all SELL trades with a recorded realized_pnl for this bot,
+    or None if DATABASE_URL is not set or the query fails.
+    """
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url:
+        logger.debug("DATABASE_URL not set - skipping realized PnL summary")
+        return None
+    try:
+        with psycopg2.connect(db_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT COALESCE(SUM(realized_pnl), 0), COALESCE(SUM(fee), 0), COUNT(*)
+                    FROM trades
+                    WHERE bot_name = %s AND side = 'sell' AND realized_pnl IS NOT NULL
+                """, (bot_name,))
+                total_pnl, total_fees, closed_trades = cur.fetchone()
+        return {
+            "total_realized_pnl": float(total_pnl),
+            "total_fees": float(total_fees),
+            "closed_trades": int(closed_trades),
+        }
+    except Exception as e:
+        logger.error(f"DB Error fetching realized PnL summary: {e}")
+        return None
 
 
 def report_equity(bot_name, equity):

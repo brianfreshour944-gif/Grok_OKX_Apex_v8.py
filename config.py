@@ -53,6 +53,18 @@ MIN_POSITION_USD             = 5.0   # ignore dust positions below this
 MIN_ORDER_USD                = 10.0  # Alpaca minimum crypto order notional
 MIN_HOLD_HOURS_BEFORE_SIGNAL = 0.5   # hold at least this long before signal-exit
 
+# Trailing stop: distance from peak scales with realized volatility (ATR%)
+# instead of a fixed 1%. trailing_stop_pct = clamp(atr_pct/100 * multiplier,
+# min, max). At atr_pct=2.0 (the "normal" baseline in regime.py) this
+# multiplier reproduces the old fixed 1% exactly, so quiet/normal-regime
+# behavior is unchanged; it only widens the stop in genuinely volatile
+# markets (giving a real trade room to breathe) and tightens it in genuinely
+# quiet ones (without going below the floor, which would chop out of a
+# winning position on pure noise).
+TRAILING_STOP_ATR_MULTIPLIER = 0.5
+MIN_TRAILING_STOP_PCT        = 0.005  # 0.5% floor
+MAX_TRAILING_STOP_PCT        = 0.03   # 3% ceiling
+
 # ── Model / data ───────────────────────────────────────────────────────────────
 SEQUENCE_LEN = 32
 MODEL_PATH   = "grok_gqa_v9_best.pth"

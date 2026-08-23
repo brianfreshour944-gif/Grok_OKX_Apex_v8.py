@@ -13,7 +13,10 @@
 
 import pytest
 
-from config import PROFIT_TARGET_PCT, STOP_LOSS_PCT, SELL_SIGNAL, MAX_HOLD_HOURS, MIN_HOLD_HOURS_BEFORE_SIGNAL
+from config import (
+    PROFIT_TARGET_PCT, STOP_LOSS_PCT, SELL_SIGNAL, MAX_HOLD_HOURS, MIN_HOLD_HOURS_BEFORE_SIGNAL,
+    TRAILING_STOP_ATR_MULTIPLIER, MIN_TRAILING_STOP_PCT, MAX_TRAILING_STOP_PCT,
+)
 from exit_logic import evaluate_exit
 
 
@@ -26,11 +29,15 @@ def _evaluate(**overrides):
         held_hours=0.0,
         signal=0.5,
         regime="normal",
+        atr_pct=2.0,  # the "normal" baseline used elsewhere in regime.py
         profit_target_pct=PROFIT_TARGET_PCT,
         stop_loss_pct=STOP_LOSS_PCT,
         sell_signal=SELL_SIGNAL,
         max_hold_hours=MAX_HOLD_HOURS,
         min_hold_hours_before_signal=MIN_HOLD_HOURS_BEFORE_SIGNAL,
+        trailing_stop_atr_multiplier=TRAILING_STOP_ATR_MULTIPLIER,
+        min_trailing_stop_pct=MIN_TRAILING_STOP_PCT,
+        max_trailing_stop_pct=MAX_TRAILING_STOP_PCT,
     )
     defaults.update(overrides)
     return evaluate_exit(**defaults)
@@ -110,6 +117,40 @@ def test_highest_seen_updates_when_new_price_exceeds_peak():
 def test_highest_seen_does_not_regress_when_price_drops():
     decision = _evaluate(avg_entry=100.0, price=105.0, highest_seen=110.0, held_hours=0.5)
     assert decision.highest_seen == 110.0
+
+
+# ── Trailing stop scales with volatility (was previously a fixed 1%) ──
+
+def test_trailing_stop_pct_matches_old_fixed_one_percent_at_baseline_volatility():
+    """atr_pct=2.0 is regime.py's own 'normal' baseline -- at that volatility
+    the new scaled trailing stop must reproduce the old hardcoded 1% exactly,
+    so quiet/normal-regime behavior is unchanged by this change."""
+    decision = _evaluate(atr_pct=2.0)
+    assert decision.trailing_stop_pct == pytest.approx(0.01)
+
+
+def test_trailing_stop_widens_in_high_volatility():
+    decision = _evaluate(atr_pct=8.0)
+    assert decision.trailing_stop_pct > 0.01
+
+
+def test_trailing_stop_tightens_in_low_volatility_but_respects_floor():
+    decision = _evaluate(atr_pct=0.2)
+    assert decision.trailing_stop_pct == pytest.approx(MIN_TRAILING_STOP_PCT)
+
+
+def test_trailing_stop_is_capped_in_extreme_volatility():
+    decision = _evaluate(atr_pct=50.0)
+    assert decision.trailing_stop_pct == pytest.approx(MAX_TRAILING_STOP_PCT)
+
+
+def test_wider_trailing_stop_survives_a_pullback_that_would_have_triggered_at_one_percent():
+    # 1.5% pullback off a 110 peak (108.35) would trip the old fixed 1% stop
+    # (threshold 108.9), but must NOT trip a high-volatility 3% stop.
+    decision = _evaluate(
+        avg_entry=100.0, price=108.35, highest_seen=110.0, held_hours=0.5, atr_pct=8.0,
+    )
+    assert decision.exit_reason is None
 
 
 # ── Max hold time ──

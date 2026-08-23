@@ -4,7 +4,7 @@ import pytest
 
 from money import (
     to_dec, mul, div, safe_pct_change, weighted_avg,
-    pnl_dollar, pnl_pct, qty, money,
+    pnl_dollar, pnl_pct, qty, money, realized_pnl,
 )
 
 
@@ -66,6 +66,30 @@ def test_money_rounds_half_up_to_two_decimals():
 def test_mul_and_div_are_inverse():
     a, b = 123.456, 7.89
     assert div(mul(a, b), b) == pytest.approx(a, rel=1e-9)
+
+
+def test_realized_pnl_subtracts_fee_from_gross_pnl():
+    # (110 - 100) * 2 - 0.5 fee = 19.5
+    assert realized_pnl(avg_entry=100, exit_price=110, qty=2, fee=0.5) == pytest.approx(19.5)
+
+
+def test_realized_pnl_defaults_fee_to_zero():
+    assert realized_pnl(avg_entry=100, exit_price=110, qty=2) == pytest.approx(20.0)
+
+
+def test_realized_pnl_handles_a_loss():
+    assert realized_pnl(avg_entry=100, exit_price=95, qty=2, fee=0.2) == pytest.approx(-10.2)
+
+
+def test_realized_pnl_does_not_raise_mixing_float_and_decimal():
+    """
+    realized_pnl combines a gross-PnL Decimal computation with a `fee` that
+    callers pass in as a plain float. Decimal does not support direct
+    arithmetic with float (Decimal(1) - 0.5 raises TypeError) -- this is a
+    regression guard against reintroducing that mismatch.
+    """
+    result = realized_pnl(avg_entry=100.0, exit_price=101.23456, qty=0.5, fee=0.0123)
+    assert isinstance(result, float)
 
 
 def test_to_dec_accepts_float_str_and_decimal():

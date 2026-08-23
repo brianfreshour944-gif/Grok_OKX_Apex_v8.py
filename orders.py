@@ -10,6 +10,7 @@ from alpaca.trading.enums import OrderSide, TimeInForce
 from config import logger, trading_client, BOT_NAME
 from database import record_trade
 from api_utils import call_with_rate_limit_handling_async
+from money import realized_pnl as calc_realized_pnl, pnl_pct as calc_pnl_pct
 
 
 def _sanitize_price(price: float) -> float:
@@ -31,7 +32,8 @@ def _sanitize_price(price: float) -> float:
         return float(d.quantize(Decimal('0.00000001'), rounding=ROUND_DOWN))
 
 
-async def place_order(symbol: str, side: OrderSide, qty: float, price: float = None) -> bool:
+async def place_order(symbol: str, side: OrderSide, qty: float, price: float = None,
+                       avg_entry: float = None) -> bool:
     """
     Submits an order to Alpaca and logs it to the database.
     BUYs are Limit Orders (0.1% above market to ensure fill).
@@ -43,6 +45,11 @@ async def place_order(symbol: str, side: OrderSide, qty: float, price: float = N
 
     After submission, fetches the filled order details from the exchange to
     record actual fill_price and fees, enabling accurate PnL tracking.
+
+    avg_entry: the position's average entry price at the time of a SELL,
+    used to compute and persist realized PnL (net of fees) for that closed
+    position. Ignored for BUY orders; if omitted on a SELL, realized PnL is
+    simply not recorded for that trade (rather than guessed).
     """
     try:
         if side == OrderSide.SELL:
@@ -100,12 +107,23 @@ async def place_order(symbol: str, side: OrderSide, qty: float, price: float = N
                     f"Diff: ${slippage:.4f} ({slippage_pct:+.2f}%)"
                 )
         
+        # Realized PnL is only meaningful for a SELL closing a known position,
+        # and only once we have an actual fill price to measure it against --
+        # measuring it against the limit `price` would conflate slippage with PnL.
+        realized_pnl_dollar = None
+        realized_pnl_pct = None
+        if side == OrderSide.SELL and avg_entry is not None and actual_fill_price is not None:
+            realized_pnl_dollar = calc_realized_pnl(avg_entry, actual_fill_price, qty, fee=actual_fee)
+            realized_pnl_pct = calc_pnl_pct(avg_entry, actual_fill_price)
+
         await asyncio.to_thread(
             record_trade,
             BOT_NAME, symbol, side.value, qty, price,
-            order_id=order.id, fee=actual_fee, fill_price=actual_fill_price
+            order_id=order.id, fee=actual_fee, fill_price=actual_fill_price,
+            realized_pnl=realized_pnl_dollar, realized_pnl_pct=realized_pnl_pct,
         )
-        logger.info(f"Order submitted: {side.value} {symbol} {qty:.6f} limit={limit_price} fill={actual_fill_price or 'pending'} fee=${actual_fee:.4f}")
+        pnl_log = f" | Realized PnL: ${realized_pnl_dollar:+.2f} ({realized_pnl_pct*100:+.2f}%)" if realized_pnl_dollar is not None else ""
+        logger.info(f"Order submitted: {side.value} {symbol} {qty:.6f} limit={limit_price} fill={actual_fill_price or 'pending'} fee=${actual_fee:.4f}{pnl_log}")
         return True
 
     except Exception as e:

@@ -71,6 +71,15 @@ def pnl_dollar(avg_entry, current_price, qty) -> float:
     return float((to_dec(current_price) - to_dec(avg_entry)) * to_dec(qty))
 
 
+def realized_pnl(avg_entry, exit_price, qty, fee=0.0) -> float:
+    """
+    Calculate realized PnL in dollars for a closed (sold) position, net of fees:
+    (exit_price - avg_entry) * qty - fee.
+    """
+    gross = (to_dec(exit_price) - to_dec(avg_entry)) * to_dec(qty)
+    return float(gross - to_dec(fee))
+
+
 def pnl_pct(avg_entry, current_price) -> float:
     """Calculate unrealized PnL percentage: (price - avg_entry) / avg_entry."""
     old_d = to_dec(avg_entry)

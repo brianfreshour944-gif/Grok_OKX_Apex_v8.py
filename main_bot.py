@@ -23,6 +23,7 @@ from config import (
     BASE_RISK_PERCENT, MIN_POSITION_USD, MIN_ORDER_USD, MAX_SINGLE_TRADE_USD,
     MIN_HOLD_HOURS_BEFORE_SIGNAL, BUY_SIGNAL,
     COOLDOWN_SECONDS_BUY, COOLDOWN_SECONDS_SELL, SLEEP_PER_LOOP,
+    TRAILING_STOP_ATR_MULTIPLIER, MIN_TRAILING_STOP_PCT, MAX_TRAILING_STOP_PCT,
     get_regime_params, fmt_price, trading_client, SYMBOLS,
 )
 from database import report_equity, init_db, save_bot_state, load_bot_state
@@ -275,11 +276,15 @@ async def run_trading_mode():
                         held_hours=held_hours,
                         signal=signal,
                         regime=regime,
+                        atr_pct=atr_pct,
                         profit_target_pct=regime_params["profit_target_pct"],
                         stop_loss_pct=regime_params["stop_loss_pct"],
                         sell_signal=regime_params["sell_signal"],
                         max_hold_hours=MAX_HOLD_HOURS,
                         min_hold_hours_before_signal=MIN_HOLD_HOURS_BEFORE_SIGNAL,
+                        trailing_stop_atr_multiplier=TRAILING_STOP_ATR_MULTIPLIER,
+                        min_trailing_stop_pct=MIN_TRAILING_STOP_PCT,
+                        max_trailing_stop_pct=MAX_TRAILING_STOP_PCT,
                     )
                     pnl_pct              = decision.pnl_pct
                     highest_seen         = decision.highest_seen
@@ -288,7 +293,7 @@ async def run_trading_mode():
 
                     if exit_reason:
                         logger.info(f"{exit_reason} — SELL {symbol} @ {fmt_price(price)} | Regime: {regime}")
-                        success = await place_order(symbol, OrderSide.SELL, qty_held, price)
+                        success = await place_order(symbol, OrderSide.SELL, qty_held, price, avg_entry=avg_entry)
                         if success:
                             task = asyncio.create_task(send_discord_alert(
                                 title=f"🔴 SELL {symbol}",
