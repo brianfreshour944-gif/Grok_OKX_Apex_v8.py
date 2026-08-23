@@ -13,6 +13,28 @@ from orders import place_order
 # Per-symbol sell retry cooldown: prevents spam when settlement is delayed.
 sell_retry_cooldown: dict = {}
 
+# Per-symbol "a sell was just submitted for this position, don't submit
+# another yet" guard, shared by every sell path (the main exit loop,
+# sell_largest_position, swap_weakest_position). Without this, a position
+# with a limit sell still unfilled keeps showing as fully held on every
+# subsequent cycle -- if the exit condition is still true (the common case;
+# prices rarely reverse within one ~40s loop iteration), the SAME exit
+# fires again and submits a duplicate full-size SELL, repeating every
+# cycle until cancel_stale_orders_async's 3-minute cleanup catches up.
+# Set to slightly longer than that 3-minute window so a genuinely stuck
+# order gets one fresh re-evaluation shortly after it's been cancelled,
+# rather than being blocked indefinitely.
+PENDING_EXIT_SECONDS = 240
+pending_exit_until: dict = {}
+
+
+def has_pending_exit(symbol: str) -> bool:
+    return time.time() < pending_exit_until.get(symbol, 0.0)
+
+
+def mark_pending_exit(symbol: str) -> None:
+    pending_exit_until[symbol] = time.time() + PENDING_EXIT_SECONDS
+
 
 def normalize_symbol(symbol: str) -> str:
     """Convert 'BTC/USD' -> 'BTCUSD' to match Alpaca's position key format."""
@@ -86,19 +108,26 @@ def _select_largest_position_to_sell() -> dict | None:
             return None
 
         largest = max(positions, key=lambda p: float(p.market_value))
+        # Denormalize here: Alpaca's position.symbol is slash-less ('BTCUSD'),
+        # but every other order submission path in this bot (place_order via
+        # main_bot.py's regular buy/sell) uses the slash format ('BTC/USD').
+        # Submitting the raw position symbol directly (as this function used
+        # to do) risked the exchange rejecting the format mismatch on every
+        # forced de-risk sell -- align on the format already proven to work.
+        symbol  = denormalize_symbol(largest.symbol)
         now     = time.time()
 
-        if largest.symbol in sell_retry_cooldown:
-            elapsed = now - sell_retry_cooldown[largest.symbol]
+        if symbol in sell_retry_cooldown:
+            elapsed = now - sell_retry_cooldown[symbol]
             if elapsed < 300:
                 logger.warning(
-                    f"⏳ Sell retry cooldown for {largest.symbol} "
+                    f"⏳ Sell retry cooldown for {symbol} "
                     f"({300 - elapsed:.0f}s remaining)"
                 )
                 return None
 
         return {
-            "symbol":    largest.symbol,
+            "symbol":    symbol,
             "qty":       float(largest.qty),
             "price":     float(largest.current_price),
             "avg_entry": float(largest.avg_entry_price),
@@ -124,6 +153,10 @@ async def sell_largest_position() -> None:
     if candidate is None:
         return
 
+    if has_pending_exit(candidate["symbol"]):
+        logger.info(f"⏳ {candidate['symbol']}: a sell is already pending, skipping duplicate force-sell")
+        return
+
     logger.warning(
         f"📉 Cap exceeded — force selling {candidate['symbol']} "
         f"${candidate['qty'] * candidate['price']:.2f}"
@@ -134,6 +167,7 @@ async def sell_largest_position() -> None:
     )
     if success:
         sell_retry_cooldown.pop(candidate["symbol"], None)
+        mark_pending_exit(candidate["symbol"])
     else:
         sell_retry_cooldown[candidate["symbol"]] = time.time()
 
@@ -205,7 +239,10 @@ def _select_weakest_position_to_swap(new_symbol: str, new_signal: float, latest_
 
             if held_signal < weakest_signal:
                 weakest_signal = held_signal
-                weakest_sym = alpaca_sym
+                # Keep the slash-formatted symbol, not the raw alpaca_sym --
+                # same format-consistency reasoning as in
+                # _select_largest_position_to_sell above.
+                weakest_sym = held_sym
                 weakest_data = p_data
 
         if weakest_sym and (new_signal - weakest_signal) >= threshold:
@@ -245,11 +282,16 @@ async def swap_weakest_position(new_symbol: str, new_signal: float, latest_signa
     if candidate is None:
         return 0.0
 
+    if has_pending_exit(candidate["symbol"]):
+        logger.info(f"⏳ {candidate['symbol']}: a sell is already pending, skipping duplicate swap-sell")
+        return 0.0
+
     success = await place_order(
         candidate["symbol"], OrderSide.SELL, candidate["qty"], candidate["price"],
         avg_entry=candidate["avg_entry"],
     )
     if success:
+        mark_pending_exit(candidate["symbol"])
         return candidate["market_value"]
     logger.error(f"Failed to execute swap sell for {candidate['symbol']}")
     return 0.0

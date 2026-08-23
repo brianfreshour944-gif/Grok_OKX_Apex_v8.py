@@ -31,7 +31,11 @@ async def call_with_rate_limit_handling(api_call_func, max_retries: int = 5, bas
     
     Raises:
         The original exception if all retries fail
+        ValueError if max_retries < 1 (the call must be attempted at least once)
     """
+    if max_retries < 1:
+        raise ValueError(f"max_retries must be >= 1, got {max_retries}")
+
     last_exception = None
     for attempt in range(max_retries):
         try:

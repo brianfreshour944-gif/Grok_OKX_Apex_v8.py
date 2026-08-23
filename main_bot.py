@@ -34,7 +34,7 @@ from portfolio import (
     get_all_positions_async, get_buying_power_async,
     sync_existing_positions, normalize_symbol, denormalize_symbol,
     swap_weakest_position, sell_largest_position, cancel_stale_orders_async, write_heartbeat,
-    calculate_kelly_multiplier
+    calculate_kelly_multiplier, has_pending_exit, mark_pending_exit,
 )
 from orders import place_order
 from exit_logic import evaluate_exit
@@ -324,7 +324,17 @@ async def run_trading_mode():
                     highest_prices[symbol] = highest_seen
                     exit_reason          = decision.exit_reason
 
-                    if exit_reason:
+                    if exit_reason and has_pending_exit(symbol):
+                        # A sell was already submitted for this exact position
+                        # last cycle (or the one before) and Alpaca still
+                        # reports it as fully held -- the limit order just
+                        # hasn't filled yet. Without this check, the same
+                        # exit condition would refire every cycle and submit
+                        # a duplicate full-size SELL on top of the pending
+                        # one, repeating until cancel_stale_orders_async's
+                        # 3-minute cleanup catches up.
+                        logger.info(f"⏳ {exit_reason} — {symbol} sell already pending, skipping duplicate submission")
+                    elif exit_reason:
                         logger.info(f"{exit_reason} — SELL {symbol} @ {fmt_price(price)} | Regime: {regime}")
                         success = await place_order(symbol, OrderSide.SELL, qty_held, price, avg_entry=avg_entry)
                         if success:
@@ -338,6 +348,7 @@ async def run_trading_mode():
                                 if not t.cancelled() and t.exception() else None
                             ))
                             cooldown_until[symbol] = now + COOLDOWN_SECONDS_SELL
+                            mark_pending_exit(symbol)
                             # We deliberately DO NOT pop entry_time or highest_prices here.
                             # If the order fails or gets canceled, we want to retain the hold-time and peak price.
                     else:

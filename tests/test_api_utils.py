@@ -70,6 +70,22 @@ def test_does_not_block_the_event_loop():
     )
 
 
+def test_max_retries_zero_raises_clear_value_error_not_type_error():
+    """
+    Regression test: with max_retries=0 the retry loop (`for attempt in
+    range(max_retries)`) never runs, so last_exception stays None and the
+    function used to do `raise None` -- a TypeError('exceptions must derive
+    from BaseException') that masks whatever the caller actually needed to
+    know. Not reachable by any current call site (all hardcode
+    max_retries=5), but a real latent bug in the function itself.
+    """
+    async def scenario():
+        await call_with_rate_limit_handling(lambda: 1 / 0, max_retries=0)
+
+    with pytest.raises(ValueError, match="max_retries must be >= 1"):
+        run_async(scenario())
+
+
 def test_retries_on_429_then_succeeds():
     attempts = {"n": 0}
 

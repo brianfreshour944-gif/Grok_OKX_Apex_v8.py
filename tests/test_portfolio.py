@@ -8,9 +8,28 @@ import pytest
 from portfolio import (
     normalize_symbol, denormalize_symbol, calculate_kelly_multiplier,
     sell_largest_position, swap_weakest_position, sync_existing_positions,
-    sell_retry_cooldown,
+    sell_retry_cooldown, pending_exit_until, has_pending_exit, mark_pending_exit,
 )
 from conftest import run_async
+
+
+@pytest.fixture(autouse=True)
+def _clear_portfolio_module_state():
+    """
+    sell_retry_cooldown and pending_exit_until are module-level dicts in
+    portfolio.py, not per-call state -- without clearing them between tests,
+    a symbol marked pending in one test (e.g. after a successful sell)
+    silently short-circuits a later test's sell_largest_position()/
+    swap_weakest_position() call for the same symbol, since it looks like
+    a sell is already in flight. This bit exactly once while adding
+    pending_exit_until: two tests started failing for a reason that had
+    nothing to do with what they were testing.
+    """
+    sell_retry_cooldown.clear()
+    pending_exit_until.clear()
+    yield
+    sell_retry_cooldown.clear()
+    pending_exit_until.clear()
 
 
 def test_normalize_symbol():
@@ -70,7 +89,6 @@ def _mock_filled_order(order_id="oid", filled_avg_price=None, commission="0.0"):
 
 
 def test_sell_largest_position_sells_biggest_by_market_value(mock_trading_client):
-    sell_retry_cooldown.clear()
     small = _mock_position("ETHUSD", "1000", "1.0", "2000", "1900")
     big = _mock_position("BTCUSD", "5000", "0.1", "50000", "48000")
     mock_trading_client.get_all_positions.return_value = [small, big]
@@ -81,8 +99,10 @@ def test_sell_largest_position_sells_biggest_by_market_value(mock_trading_client
 
     assert mock_trading_client.submit_order.called
     order_data = mock_trading_client.submit_order.call_args.kwargs["order_data"]
-    assert order_data.symbol == "BTCUSD"
-    sell_retry_cooldown.clear()
+    # Must be the slash format ('BTC/USD'), matching every other order
+    # submission path -- not Alpaca's raw slash-less position.symbol
+    # ('BTCUSD'), which risks a format-mismatch rejection on the exchange.
+    assert order_data.symbol == "BTC/USD"
 
 
 def test_sell_largest_position_no_positions_is_a_noop(mock_trading_client):
@@ -92,35 +112,82 @@ def test_sell_largest_position_no_positions_is_a_noop(mock_trading_client):
 
 
 def test_sell_largest_position_respects_retry_cooldown(mock_trading_client):
-    sell_retry_cooldown.clear()
     import time
     pos = _mock_position("BTCUSD", "5000", "0.1", "50000", "48000")
     mock_trading_client.get_all_positions.return_value = [pos]
-    sell_retry_cooldown["BTCUSD"] = time.time()  # just failed a moment ago
+    sell_retry_cooldown["BTC/USD"] = time.time()  # just failed a moment ago
 
     run_async(sell_largest_position())
 
     assert not mock_trading_client.submit_order.called
-    sell_retry_cooldown.clear()
 
 
 def test_sell_largest_position_sets_retry_cooldown_on_failure(mock_trading_client):
-    sell_retry_cooldown.clear()
     pos = _mock_position("BTCUSD", "5000", "0.1", "50000", "48000")
     mock_trading_client.get_all_positions.return_value = [pos]
     mock_trading_client.submit_order.side_effect = RuntimeError("exchange rejected order")
 
     run_async(sell_largest_position())
 
-    assert "BTCUSD" in sell_retry_cooldown
-    sell_retry_cooldown.clear()
+    assert "BTC/USD" in sell_retry_cooldown
+
+
+# ── pending-exit guard: prevents duplicate SELLs on a still-unfilled position ──
+
+def test_has_pending_exit_false_by_default():
+    assert has_pending_exit("BTC/USD") is False
+
+
+def test_has_pending_exit_true_immediately_after_marking():
+    mark_pending_exit("BTC/USD")
+    assert has_pending_exit("BTC/USD") is True
+
+
+def test_sell_largest_position_skips_when_a_sell_is_already_pending(mock_trading_client):
+    """
+    Without this guard: has_position stays True every cycle while a limit
+    sell remains unfilled (Alpaca still reports the position as fully
+    held), so the same exit condition re-fires and submits a duplicate
+    full-size SELL on top of the still-pending one.
+    """
+    pos = _mock_position("BTCUSD", "5000", "0.1", "50000", "48000")
+    mock_trading_client.get_all_positions.return_value = [pos]
+    mark_pending_exit("BTC/USD")
+
+    run_async(sell_largest_position())
+
+    assert not mock_trading_client.submit_order.called
+
+
+def test_sell_largest_position_marks_pending_exit_on_success(mock_trading_client):
+    pos = _mock_position("BTCUSD", "5000", "0.1", "50000", "48000")
+    mock_trading_client.get_all_positions.return_value = [pos]
+    mock_trading_client.submit_order.return_value = _mock_filled_order()
+    mock_trading_client.get_order_by_id.return_value = _mock_filled_order(filled_avg_price="50000")
+
+    run_async(sell_largest_position())
+
+    assert has_pending_exit("BTC/USD")
+
+
+def test_swap_weakest_position_skips_when_a_sell_is_already_pending(mock_trading_client):
+    mock_trading_client.get_all_positions.return_value = [
+        _mock_position("BTCUSD", "5000", "0.1", "50000", "48000"),
+    ]
+    mark_pending_exit("BTC/USD")
+
+    sold_value = run_async(
+        swap_weakest_position("SOL/USD", new_signal=0.90, latest_signals={"BTC/USD": 0.40}, threshold=0.05)
+    )
+
+    assert sold_value == 0.0
+    assert not mock_trading_client.submit_order.called
 
 
 def test_sell_largest_position_records_realized_pnl(mock_trading_client):
     """The whole point of routing this through place_order() -- unlike the
     old direct trading_client.submit_order() call, this sell must now show
     up with a realized PnL, same as any other exit."""
-    sell_retry_cooldown.clear()
     pos = _mock_position("BTCUSD", "5000", "0.1", "50000", "48000")
     mock_trading_client.get_all_positions.return_value = [pos]
     mock_trading_client.submit_order.return_value = _mock_filled_order()
@@ -133,7 +200,6 @@ def test_sell_largest_position_records_realized_pnl(mock_trading_client):
         run_async(sell_largest_position())
 
     assert recorded["realized_pnl"] == pytest.approx((50000.0 - 48000.0) * 0.1)
-    sell_retry_cooldown.clear()
 
 
 # ── swap_weakest_position ──
@@ -151,7 +217,7 @@ def test_swap_weakest_position_sells_the_lowest_signal_holding(mock_trading_clie
 
     assert sold_value == pytest.approx(2000.0)
     order_data = mock_trading_client.submit_order.call_args.kwargs["order_data"]
-    assert order_data.symbol == "ETHUSD"
+    assert order_data.symbol == "ETH/USD"
 
 
 def test_swap_weakest_position_does_nothing_below_threshold(mock_trading_client):

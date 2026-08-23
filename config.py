@@ -12,8 +12,12 @@ from alpaca.trading.client import TradingClient
 from alpaca.data.historical import CryptoHistoricalDataClient
 
 # ── Logging ────────────────────────────────────────────────────────────────────
+# .env.example documents LOG_LEVEL as configurable; it previously wasn't --
+# config.py hardcoded logging.INFO regardless of what was set. Now actually
+# reads it, defaulting to INFO to preserve prior behavior when unset.
+_LOG_LEVEL_NAME = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, _LOG_LEVEL_NAME, logging.INFO),
     format='%(asctime)s | %(levelname)s | %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -65,8 +69,8 @@ MAX_OPEN_POSITIONS           = 10
 MAX_HOLD_HOURS               = 4.0
 PROFIT_TARGET_PCT            = 0.02
 STOP_LOSS_PCT                = 0.03
-BUY_SIGNAL                   = 0.51
-SELL_SIGNAL                  = 0.45
+BUY_SIGNAL                   = float(os.getenv("BUY_SIGNAL", 0.51))
+SELL_SIGNAL                  = float(os.getenv("SELL_SIGNAL", 0.45))
 MIN_POSITION_USD             = 5.0   # ignore dust positions below this
 MIN_ORDER_USD                = 10.0  # Alpaca minimum crypto order notional
 MIN_HOLD_HOURS_BEFORE_SIGNAL = 0.5   # hold at least this long before signal-exit
