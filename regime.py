@@ -2,7 +2,7 @@
 
 import pandas as pd
 from config import logger, BASE_RISK_PERCENT, MAX_SINGLE_TRADE_USD
-from money import to_dec, mul, div
+from money import mul, div
 
 
 def compute_regime_and_trend(df: pd.DataFrame):

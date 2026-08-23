@@ -8,7 +8,6 @@ from alpaca.data.requests import CryptoBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 from config import logger, data_client, SEQUENCE_LEN
-import asyncio
 
 async def get_orderbook_with_retry(symbol: str, retries: int = 3, backoff: float = 1.0):
     """Fetches the latest orderbook with exponential backoff on failure."""

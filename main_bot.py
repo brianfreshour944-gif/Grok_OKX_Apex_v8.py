@@ -11,9 +11,7 @@ import time
 sys.stdout.reconfigure(encoding='utf-8')
 sys.stderr.reconfigure(encoding='utf-8')
 
-import numpy as np
 import psycopg2
-import torch
 
 from alpaca.trading.enums import OrderSide
 
@@ -21,7 +19,7 @@ from config import (
     logger, BOT_NAME, SEQUENCE_LEN, MODEL_PATH,
     MAX_OPEN_POSITIONS, MAX_DRAWDOWN_STOP, MAX_HOLD_HOURS,
     BASE_RISK_PERCENT, MIN_POSITION_USD, MIN_ORDER_USD, MAX_SINGLE_TRADE_USD,
-    MIN_HOLD_HOURS_BEFORE_SIGNAL, BUY_SIGNAL,
+    MIN_HOLD_HOURS_BEFORE_SIGNAL,
     COOLDOWN_SECONDS_BUY, COOLDOWN_SECONDS_SELL, SLEEP_PER_LOOP,
     TRAILING_STOP_ATR_MULTIPLIER, MIN_TRAILING_STOP_PCT, MAX_TRAILING_STOP_PCT,
     DYNAMIC_UNIVERSE_CANDIDATES, UNIVERSE_SIZE, UNIVERSE_REFRESH_SECONDS,
@@ -38,11 +36,9 @@ from portfolio import (
 )
 from orders import place_order
 from exit_logic import evaluate_exit
-from feature_engineering import add_features, FEATURE_COLS
 from notifications import send_discord_alert
 from ml_predictor import SafeMLPredictor
-from money import to_dec, mul, div, weighted_avg, pnl_dollar, qty as money_qty, money
-import joblib
+from money import mul, div, qty as money_qty
 
 # --- Global state ---
 cooldown_until: dict = {}

@@ -2,7 +2,6 @@
 # Handles HTTP 429 (Too Many Requests) and transient failures gracefully.
 
 import asyncio
-import time
 
 from config import logger
 

@@ -7,7 +7,7 @@ import os
 import joblib
 import pandas as pd
 
-from feature_engineering import add_features, FEATURE_COLS, FEATURE_DEFAULTS
+from feature_engineering import add_features, FEATURE_COLS
 
 # This module's own print() calls below use emoji (checkmarks/warnings).
 # main_bot.py reconfigures stdout/stderr to UTF-8 before importing this

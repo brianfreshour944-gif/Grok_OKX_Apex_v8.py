@@ -6,7 +6,7 @@ import time
 from alpaca.trading.enums import OrderSide
 
 from config import (
-    logger, trading_client, MIN_POSITION_USD, HEARTBEAT_PATH
+    logger, trading_client, HEARTBEAT_PATH
 )
 from orders import place_order
 

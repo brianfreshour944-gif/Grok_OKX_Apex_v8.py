@@ -4,8 +4,7 @@
 
 import os
 import psycopg2
-import json
-from config import logger, BOT_NAME
+from config import logger
 
 
 def _init_bot_status_table(cur):
