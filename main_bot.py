@@ -198,7 +198,7 @@ async def run_trading_mode():
 
             if total_value >= max_portfolio_value:
                 logger.warning(f"Position exposure ${total_value:.2f} >= cap ${max_portfolio_value:.2f} (equity=${equity:.2f})")
-                await asyncio.to_thread(sell_largest_position)
+                await sell_largest_position()
                 buys_allowed = False
 
             if open_count >= MAX_OPEN_POSITIONS:
@@ -365,9 +365,7 @@ async def run_trading_mode():
 
 
                     if not buys_allowed:
-                        sold_notional = await asyncio.to_thread(
-                            swap_weakest_position, symbol, signal, latest_signals
-                        )
+                        sold_notional = await swap_weakest_position(symbol, signal, latest_signals)
                         if sold_notional > 0:
                             logger.info(f"✅ Swapped weak position to make room for {symbol}. Proceeding with buy.")
                             buys_allowed = True

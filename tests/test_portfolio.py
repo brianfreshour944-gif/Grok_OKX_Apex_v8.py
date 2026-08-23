@@ -10,6 +10,7 @@ from portfolio import (
     sell_largest_position, swap_weakest_position, sync_existing_positions,
     sell_retry_cooldown,
 )
+from conftest import run_async
 
 
 def test_normalize_symbol():
@@ -42,35 +43,81 @@ def test_kelly_multiplier_always_within_bounds():
 
 # ── sell_largest_position (mocked Alpaca client) ──
 
+def _mock_position(symbol, market_value, qty, current_price, avg_entry_price):
+    return MagicMock(
+        symbol=symbol, market_value=market_value, qty=qty,
+        current_price=current_price, avg_entry_price=avg_entry_price,
+    )
+
+
+def _mock_filled_order(order_id="oid", filled_avg_price=None, commission="0.0"):
+    return MagicMock(id=order_id, filled_avg_price=filled_avg_price, commission=commission)
+
+
 def test_sell_largest_position_sells_biggest_by_market_value(mock_trading_client):
     sell_retry_cooldown.clear()
-    small = MagicMock(symbol="ETHUSD", market_value="1000", qty="1.0", current_price="2000")
-    big = MagicMock(symbol="BTCUSD", market_value="5000", qty="0.1", current_price="50000")
+    small = _mock_position("ETHUSD", "1000", "1.0", "2000", "1900")
+    big = _mock_position("BTCUSD", "5000", "0.1", "50000", "48000")
     mock_trading_client.get_all_positions.return_value = [small, big]
+    mock_trading_client.submit_order.return_value = _mock_filled_order()
+    mock_trading_client.get_order_by_id.return_value = _mock_filled_order(filled_avg_price="50000")
 
-    sell_largest_position()
+    run_async(sell_largest_position())
 
     assert mock_trading_client.submit_order.called
     order_data = mock_trading_client.submit_order.call_args.kwargs["order_data"]
     assert order_data.symbol == "BTCUSD"
+    sell_retry_cooldown.clear()
 
 
 def test_sell_largest_position_no_positions_is_a_noop(mock_trading_client):
     mock_trading_client.get_all_positions.return_value = []
-    sell_largest_position()  # must not raise
+    run_async(sell_largest_position())  # must not raise
     assert not mock_trading_client.submit_order.called
 
 
 def test_sell_largest_position_respects_retry_cooldown(mock_trading_client):
     sell_retry_cooldown.clear()
     import time
-    pos = MagicMock(symbol="BTCUSD", market_value="5000", qty="0.1", current_price="50000")
+    pos = _mock_position("BTCUSD", "5000", "0.1", "50000", "48000")
     mock_trading_client.get_all_positions.return_value = [pos]
     sell_retry_cooldown["BTCUSD"] = time.time()  # just failed a moment ago
 
-    sell_largest_position()
+    run_async(sell_largest_position())
 
     assert not mock_trading_client.submit_order.called
+    sell_retry_cooldown.clear()
+
+
+def test_sell_largest_position_sets_retry_cooldown_on_failure(mock_trading_client):
+    sell_retry_cooldown.clear()
+    pos = _mock_position("BTCUSD", "5000", "0.1", "50000", "48000")
+    mock_trading_client.get_all_positions.return_value = [pos]
+    mock_trading_client.submit_order.side_effect = RuntimeError("exchange rejected order")
+
+    run_async(sell_largest_position())
+
+    assert "BTCUSD" in sell_retry_cooldown
+    sell_retry_cooldown.clear()
+
+
+def test_sell_largest_position_records_realized_pnl(mock_trading_client):
+    """The whole point of routing this through place_order() -- unlike the
+    old direct trading_client.submit_order() call, this sell must now show
+    up with a realized PnL, same as any other exit."""
+    sell_retry_cooldown.clear()
+    pos = _mock_position("BTCUSD", "5000", "0.1", "50000", "48000")
+    mock_trading_client.get_all_positions.return_value = [pos]
+    mock_trading_client.submit_order.return_value = _mock_filled_order()
+    mock_trading_client.get_order_by_id.return_value = _mock_filled_order(filled_avg_price="50000")
+
+    import orders
+    recorded = {}
+    import unittest.mock as um
+    with um.patch.object(orders, "record_trade", lambda *a, **kw: recorded.update(kw)):
+        run_async(sell_largest_position())
+
+    assert recorded["realized_pnl"] == pytest.approx((50000.0 - 48000.0) * 0.1)
     sell_retry_cooldown.clear()
 
 
@@ -80,12 +127,14 @@ def test_swap_weakest_position_sells_the_lowest_signal_holding(mock_trading_clie
     import portfolio
     monkeypatch.setattr(portfolio, "SYMBOLS", ["BTC/USD", "ETH/USD"])
     mock_trading_client.get_all_positions.return_value = [
-        MagicMock(symbol="BTCUSD", qty="0.1", current_price="50000", market_value="5000"),
-        MagicMock(symbol="ETHUSD", qty="1.0", current_price="2000", market_value="2000"),
+        _mock_position("BTCUSD", "5000", "0.1", "50000", "48000"),
+        _mock_position("ETHUSD", "2000", "1.0", "2000", "1900"),
     ]
+    mock_trading_client.submit_order.return_value = _mock_filled_order()
+    mock_trading_client.get_order_by_id.return_value = _mock_filled_order(filled_avg_price="2000")
     latest_signals = {"BTC/USD": 0.55, "ETH/USD": 0.40}  # ETH is weakest
 
-    sold_value = swap_weakest_position("SOL/USD", new_signal=0.90, latest_signals=latest_signals, threshold=0.05)
+    sold_value = run_async(swap_weakest_position("SOL/USD", new_signal=0.90, latest_signals=latest_signals, threshold=0.05))
 
     assert sold_value == pytest.approx(2000.0)
     order_data = mock_trading_client.submit_order.call_args.kwargs["order_data"]
@@ -96,14 +145,28 @@ def test_swap_weakest_position_does_nothing_below_threshold(mock_trading_client,
     import portfolio
     monkeypatch.setattr(portfolio, "SYMBOLS", ["BTC/USD"])
     mock_trading_client.get_all_positions.return_value = [
-        MagicMock(symbol="BTCUSD", qty="0.1", current_price="50000", market_value="5000"),
+        _mock_position("BTCUSD", "5000", "0.1", "50000", "48000"),
     ]
     latest_signals = {"BTC/USD": 0.55}
 
-    sold_value = swap_weakest_position("SOL/USD", new_signal=0.56, latest_signals=latest_signals, threshold=0.05)
+    sold_value = run_async(swap_weakest_position("SOL/USD", new_signal=0.56, latest_signals=latest_signals, threshold=0.05))
 
     assert sold_value == 0.0
     assert not mock_trading_client.submit_order.called
+
+
+def test_swap_weakest_position_returns_zero_on_sell_failure(mock_trading_client, monkeypatch):
+    import portfolio
+    monkeypatch.setattr(portfolio, "SYMBOLS", ["BTC/USD"])
+    mock_trading_client.get_all_positions.return_value = [
+        _mock_position("BTCUSD", "5000", "0.1", "50000", "48000"),
+    ]
+    mock_trading_client.submit_order.side_effect = RuntimeError("exchange rejected order")
+    latest_signals = {"BTC/USD": 0.40}
+
+    sold_value = run_async(swap_weakest_position("SOL/USD", new_signal=0.90, latest_signals=latest_signals, threshold=0.05))
+
+    assert sold_value == 0.0
 
 
 # ── sync_existing_positions ──

@@ -3,12 +3,12 @@
 import asyncio
 import time
 
-from alpaca.trading.requests import LimitOrderRequest
-from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.trading.enums import OrderSide
 
 from config import (
     logger, trading_client, SYMBOLS, MIN_POSITION_USD, HEARTBEAT_PATH
 )
+from orders import place_order
 
 # Per-symbol sell retry cooldown: prevents spam when settlement is delayed.
 sell_retry_cooldown: dict = {}
@@ -59,16 +59,17 @@ async def get_buying_power_async() -> float:
     return await asyncio.to_thread(get_buying_power)
 
 
-def sell_largest_position() -> None:
+def _select_largest_position_to_sell() -> dict | None:
     """
-    Force-sells the largest open position (by market value) when the
-    portfolio cap is exceeded. Backs off for 5 minutes after a failed attempt
-    to avoid spamming Alpaca when cash hasn't settled.
+    Picks the largest open position (by market value) to force-sell when the
+    portfolio cap is exceeded. Read-only -- does not submit anything. Returns
+    None if there's nothing to sell or the symbol is still in its 5-minute
+    retry-cooldown window (avoids spamming Alpaca when cash hasn't settled).
     """
     try:
         positions = trading_client.get_all_positions()
         if not positions:
-            return
+            return None
 
         largest = max(positions, key=lambda p: float(p.market_value))
         now     = time.time()
@@ -80,26 +81,14 @@ def sell_largest_position() -> None:
                     f"⏳ Sell retry cooldown for {largest.symbol} "
                     f"({300 - elapsed:.0f}s remaining)"
                 )
-                return
+                return None
 
-        logger.warning(
-            f"📉 Cap exceeded — force selling {largest.symbol} "
-            f"${float(largest.market_value):.2f}"
-        )
-        try:
-            trading_client.submit_order(
-                order_data=LimitOrderRequest(
-                    symbol=largest.symbol,
-                    qty=float(largest.qty),
-                    side=OrderSide.SELL,
-                    time_in_force=TimeInForce.GTC,
-                    limit_price=float(largest.current_price)
-                )
-            )
-            sell_retry_cooldown.pop(largest.symbol, None)
-        except Exception as sell_err:
-            sell_retry_cooldown[largest.symbol] = now
-            logger.error(f"Sell order failed (will retry later): {sell_err}")
+        return {
+            "symbol":    largest.symbol,
+            "qty":       float(largest.qty),
+            "price":     float(largest.current_price),
+            "avg_entry": float(largest.avg_entry_price),
+        }
 
     except Exception as e:
         status_code = getattr(e, 'status_code', None)
@@ -107,6 +96,32 @@ def sell_largest_position() -> None:
             logger.warning(f"Rate limited during sell_largest_position. Will retry next cycle: {e}")
         else:
             logger.error(f"sell_largest_position failed: {e}")
+        return None
+
+
+async def sell_largest_position() -> None:
+    """
+    Force-sells the largest open position (by market value) when the
+    portfolio cap is exceeded, via place_order() so it gets the same
+    rate-limit handling, DB logging, and realized-PnL tracking as every
+    other sell in the bot. Backs off for 5 minutes after a failed attempt.
+    """
+    candidate = await asyncio.to_thread(_select_largest_position_to_sell)
+    if candidate is None:
+        return
+
+    logger.warning(
+        f"📉 Cap exceeded — force selling {candidate['symbol']} "
+        f"${candidate['qty'] * candidate['price']:.2f}"
+    )
+    success = await place_order(
+        candidate["symbol"], OrderSide.SELL, candidate["qty"], candidate["price"],
+        avg_entry=candidate["avg_entry"],
+    )
+    if success:
+        sell_retry_cooldown.pop(candidate["symbol"], None)
+    else:
+        sell_retry_cooldown[candidate["symbol"]] = time.time()
 
 
 def sync_existing_positions(entry_time: dict, highest_prices: dict) -> None:
@@ -154,26 +169,21 @@ def sync_existing_positions(entry_time: dict, highest_prices: dict) -> None:
                 break
 
 
-def swap_weakest_position(new_symbol: str, new_signal: float, latest_signals: dict, threshold: float = 0.05) -> float:
+def _select_weakest_position_to_swap(new_symbol: str, new_signal: float, latest_signals: dict, threshold: float):
     """
-    Evaluates currently open positions. If there's a held position with a signal significantly 
-    weaker than the new_signal, it force-sells that position to free up capital.
-
-    Returns the market value (USD notional) of the position sold, so callers can
-    decrement their own running portfolio-value tracking accordingly. Returns
-    0.0 if no swap was executed (nothing to swap, threshold not met, or the
-    sell order failed).
+    Evaluates currently open positions. If there's a held position with a signal
+    significantly weaker than new_signal, returns the fields needed to sell it
+    (symbol, qty, price, avg_entry, market_value). Read-only -- does not submit
+    anything. Returns None if there's nothing to swap or threshold isn't met.
     """
     try:
         positions = get_all_positions()
         if not positions:
-            return 0.0
+            return None
 
         weakest_sym = None
         weakest_signal = float('inf')
-        weakest_qty = 0.0
-        weakest_price = 0.0
-        weakest_value = 0.0
+        weakest_data = None
 
         for alpaca_sym, p_data in positions.items():
             # Reverse map from alpaca_sym to standard symbol
@@ -187,36 +197,52 @@ def swap_weakest_position(new_symbol: str, new_signal: float, latest_signals: di
             if held_signal < weakest_signal:
                 weakest_signal = held_signal
                 weakest_sym = alpaca_sym
-                weakest_qty = p_data['qty']
-                weakest_price = p_data['current_price']
-                weakest_value = p_data['market_value']
+                weakest_data = p_data
 
         if weakest_sym and (new_signal - weakest_signal) >= threshold:
             logger.warning(
                 f"🔄 SWAP TRIGGERED: Selling {weakest_sym} (signal {weakest_signal:.4f}) "
                 f"to make room for {new_symbol} (signal {new_signal:.4f})"
             )
-            
-            # Execute limit sell for the weakest asset
-            try:
-                from alpaca.trading.requests import LimitOrderRequest
-                trading_client.submit_order(
-                    order_data=LimitOrderRequest(
-                        symbol=weakest_sym,
-                        qty=float(weakest_qty),
-                        side=OrderSide.SELL,
-                        time_in_force=TimeInForce.GTC,
-                        limit_price=float(weakest_price)
-                    )
-                )
-                return float(weakest_value)
-            except Exception as e:
-                logger.error(f"Failed to execute swap sell for {weakest_sym}: {e}")
-                return 0.0
+            return {
+                "symbol":       weakest_sym,
+                "qty":          float(weakest_data['qty']),
+                "price":        float(weakest_data['current_price']),
+                "avg_entry":    float(weakest_data['avg_entry']),
+                "market_value": float(weakest_data['market_value']),
+            }
 
     except Exception as e:
         logger.error(f"swap_weakest_position failed: {e}")
-        
+
+    return None
+
+
+async def swap_weakest_position(new_symbol: str, new_signal: float, latest_signals: dict, threshold: float = 0.05) -> float:
+    """
+    Force-sells the currently held position with the weakest signal (if it's
+    significantly weaker than new_signal) to free up capital, via place_order()
+    so it gets the same rate-limit handling, DB logging, and realized-PnL
+    tracking as every other sell in the bot.
+
+    Returns the market value (USD notional) of the position sold, so callers can
+    decrement their own running portfolio-value tracking accordingly. Returns
+    0.0 if no swap was executed (nothing to swap, threshold not met, or the
+    sell order failed).
+    """
+    candidate = await asyncio.to_thread(
+        _select_weakest_position_to_swap, new_symbol, new_signal, latest_signals, threshold
+    )
+    if candidate is None:
+        return 0.0
+
+    success = await place_order(
+        candidate["symbol"], OrderSide.SELL, candidate["qty"], candidate["price"],
+        avg_entry=candidate["avg_entry"],
+    )
+    if success:
+        return candidate["market_value"]
+    logger.error(f"Failed to execute swap sell for {candidate['symbol']}")
     return 0.0
 
 def cancel_stale_orders(timeout_minutes=3):
