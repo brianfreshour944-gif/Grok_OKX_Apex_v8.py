@@ -35,10 +35,11 @@ from portfolio import (
     calculate_kelly_multiplier
 )
 from orders import place_order
+from exit_logic import evaluate_exit
 from feature_engineering import add_features, FEATURE_COLS
 from notifications import send_discord_alert
 from ml_predictor import SafeMLPredictor
-from money import to_dec, mul, div, safe_pct_change, weighted_avg, pnl_dollar, pnl_pct, qty as money_qty, money
+from money import to_dec, mul, div, weighted_avg, pnl_dollar, qty as money_qty, money
 import joblib
 
 # --- Global state ---
@@ -265,36 +266,25 @@ async def run_trading_mode():
 
                 # ── EXIT ───────────────────────────────────────────────────────
                 if has_position:
-                    # safe_pct_change() returns a percentage (already x100); divide back
-                    # down to a fraction so the -dynamic_sl_pct comparison below and the
-                    # *100 in the log/alert strings operate on consistent units.
-                    pnl_pct    = safe_pct_change(avg_entry, price) / 100.0 if avg_entry > 0 else 0.0
                     held_hours = (now - entry_time.get(symbol, now)) / 3600
-                    exit_reason = None
-                    
-                    highest_seen = highest_prices.get(symbol, avg_entry)
-                    if price > highest_seen:
-                        highest_prices[symbol] = price
-                        highest_seen = price
 
-                    # Time-Decay Stop Loss Logic
-                    dynamic_sl_pct = regime_params["stop_loss_pct"]
-                    if held_hours >= 2.0:
-                        dynamic_sl_pct = regime_params["stop_loss_pct"] * 0.5  # Halve the stop loss
-                    elif held_hours >= 1.0:
-                        dynamic_sl_pct = regime_params["stop_loss_pct"] * 0.75 # Tighten by 25%
-
-                    if highest_seen > avg_entry * (1 + regime_params["profit_target_pct"]):
-                        # Trailing Mode Active (1% trailing stop from peak)
-                        trailing_stop_price = highest_seen * 0.99
-                        if price <= trailing_stop_price:
-                            exit_reason = f"📉 Trailing Stop triggered (Peak: ${fmt_price(highest_seen)}, PnL: {pnl_pct*100:.2f}%) [{regime}]"
-                    elif pnl_pct <= -dynamic_sl_pct:
-                        exit_reason = f"🛑 Time-Decay Stop loss ({pnl_pct*100:.2f}% <= -{dynamic_sl_pct*100:.2f}%) [{regime}]"
-                    elif held_hours >= MAX_HOLD_HOURS:
-                        exit_reason = f"⏰ Max hold time ({held_hours:.1f}h)"
-                    elif held_hours >= MIN_HOLD_HOURS_BEFORE_SIGNAL and signal < regime_params["sell_signal"]:
-                        exit_reason = f"📉 Signal weak ({signal:.3f}) [{regime}]"
+                    decision = evaluate_exit(
+                        avg_entry=avg_entry,
+                        price=price,
+                        highest_seen=highest_prices.get(symbol, avg_entry),
+                        held_hours=held_hours,
+                        signal=signal,
+                        regime=regime,
+                        profit_target_pct=regime_params["profit_target_pct"],
+                        stop_loss_pct=regime_params["stop_loss_pct"],
+                        sell_signal=regime_params["sell_signal"],
+                        max_hold_hours=MAX_HOLD_HOURS,
+                        min_hold_hours_before_signal=MIN_HOLD_HOURS_BEFORE_SIGNAL,
+                    )
+                    pnl_pct              = decision.pnl_pct
+                    highest_seen         = decision.highest_seen
+                    highest_prices[symbol] = highest_seen
+                    exit_reason          = decision.exit_reason
 
                     if exit_reason:
                         logger.info(f"{exit_reason} — SELL {symbol} @ {fmt_price(price)} | Regime: {regime}")

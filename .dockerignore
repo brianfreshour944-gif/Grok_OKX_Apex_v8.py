@@ -24,6 +24,9 @@ train_transformer.py
 shadow_data_collector.py
 check_scaler.py
 test_ws.py
+tests/
+.pytest_cache/
+requirements-dev.txt
 
 # Local IDE/editor files
 .vscode/
