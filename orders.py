@@ -10,7 +10,7 @@ from alpaca.trading.enums import OrderSide, TimeInForce
 from config import logger, trading_client, BOT_NAME
 from database import record_trade
 from api_utils import call_with_rate_limit_handling_async
-from money import realized_pnl as calc_realized_pnl, pnl_pct as calc_pnl_pct
+from money import realized_pnl as calc_realized_pnl, pnl_pct_fraction as calc_pnl_pct
 
 
 def _sanitize_price(price: float) -> float:

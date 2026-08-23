@@ -3,31 +3,34 @@
 import pytest
 
 from money import (
-    to_dec, mul, div, safe_pct_change, weighted_avg,
-    pnl_dollar, pnl_pct, qty, money, realized_pnl,
+    to_dec, mul, div, pct_change_x100, weighted_avg,
+    pnl_dollar, pnl_pct_fraction, qty, money, realized_pnl,
 )
 
 
-def test_safe_pct_change_and_pnl_pct_have_different_scales():
+def test_pct_change_x100_and_pnl_pct_fraction_have_different_scales():
     """
-    safe_pct_change() returns a PERCENTAGE (already x100); pnl_pct() returns
-    a FRACTION. They are not interchangeable -- confusing the two is exactly
+    pct_change_x100() (formerly safe_pct_change()) returns a PERCENTAGE
+    (already x100); pnl_pct_fraction() (formerly pnl_pct()) returns a
+    FRACTION. They are not interchangeable -- confusing the two is exactly
     the bug fixed in main_bot.py's exit logic (see exit_logic.py /
-    tests/test_exit_logic.py). Pinning this down so a future refactor can't
-    silently make the two consistent with each other and reintroduce the
-    100x mismatch at whichever call site still assumes the old scale.
+    tests/test_exit_logic.py), which is also why they were renamed off a
+    shared "pnl_pct"-shaped name to make the scale unmistakable at every
+    call site. Pinning this down so a future refactor can't silently make
+    the two consistent with each other and reintroduce the 100x mismatch at
+    whichever call site still assumes the old scale.
     """
-    assert safe_pct_change(100, 105) == pytest.approx(5.0)
-    assert pnl_pct(100, 105) == pytest.approx(0.05)
-    assert safe_pct_change(100, 105) == pytest.approx(pnl_pct(100, 105) * 100)
+    assert pct_change_x100(100, 105) == pytest.approx(5.0)
+    assert pnl_pct_fraction(100, 105) == pytest.approx(0.05)
+    assert pct_change_x100(100, 105) == pytest.approx(pnl_pct_fraction(100, 105) * 100)
 
 
-def test_safe_pct_change_zero_old_price_returns_zero():
-    assert safe_pct_change(0, 105) == 0.0
+def test_pct_change_x100_zero_old_price_returns_zero():
+    assert pct_change_x100(0, 105) == 0.0
 
 
-def test_pnl_pct_zero_avg_entry_returns_zero():
-    assert pnl_pct(0, 105) == 0.0
+def test_pnl_pct_fraction_zero_avg_entry_returns_zero():
+    assert pnl_pct_fraction(0, 105) == 0.0
 
 
 def test_div_by_zero_raises():

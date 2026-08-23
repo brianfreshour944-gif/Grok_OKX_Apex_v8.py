@@ -48,8 +48,17 @@ def div(numerator, denominator) -> float:
     return float(num / den)
 
 
-def safe_pct_change(old_price, new_price) -> float:
-    """Calculate percentage change: (new - old) / old, Decimal precision."""
+def pct_change_x100(old_price, new_price) -> float:
+    """
+    Calculate percentage change: (new - old) / old, Decimal precision.
+
+    Returns a PERCENTAGE already scaled by 100 (e.g. 3.0 for a 3% move) --
+    NOT a fraction. See pnl_pct_fraction() below for the fraction-scale
+    equivalent. This repo shipped a real bug once (commit 9610523) from
+    conflating the two scales; the differing names are meant to make the
+    scale unmistakable at every call site rather than relying on
+    documentation alone.
+    """
     old_d = to_dec(old_price)
     new_d = to_dec(new_price)
     if old_d == 0:
@@ -80,8 +89,13 @@ def realized_pnl(avg_entry, exit_price, qty, fee=0.0) -> float:
     return float(gross - to_dec(fee))
 
 
-def pnl_pct(avg_entry, current_price) -> float:
-    """Calculate unrealized PnL percentage: (price - avg_entry) / avg_entry."""
+def pnl_pct_fraction(avg_entry, current_price) -> float:
+    """
+    Calculate unrealized PnL as a FRACTION: (price - avg_entry) / avg_entry
+    (e.g. 0.03 for a 3% move) -- NOT a percentage. See pct_change_x100()
+    above for the x100-scale equivalent; the two are easy to conflate, which
+    is why they're named differently rather than both called "pct_change".
+    """
     old_d = to_dec(avg_entry)
     new_d = to_dec(current_price)
     if old_d == 0:

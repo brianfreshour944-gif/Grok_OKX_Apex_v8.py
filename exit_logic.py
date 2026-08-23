@@ -3,16 +3,16 @@
 # client, no DB, no asyncio event loop needed to exercise it).
 #
 # This is exactly the code path that had the pnl_pct unit-mismatch bug
-# (safe_pct_change() returns a percentage but was compared against a
-# fractional stop_loss_pct) — it was untestable in isolation before this
-# extraction, which is how that bug shipped across several "Fix ..."
-# commits without being caught.
+# (money.pct_change_x100(), formerly named safe_pct_change(), returns a
+# percentage but was compared against a fractional stop_loss_pct) — it was
+# untestable in isolation before this extraction, which is how that bug
+# shipped across several "Fix ..." commits without being caught.
 
 from dataclasses import dataclass
 from typing import Optional
 
 from config import fmt_price
-from money import safe_pct_change
+from money import pct_change_x100
 
 
 @dataclass
@@ -47,7 +47,7 @@ def evaluate_exit(
 
     All *_pct arguments are fractions (0.03 == 3%), matching config.py's
     convention (BUY/SELL/PROFIT_TARGET/STOP_LOSS are all fractions there).
-    pnl_pct is computed via money.safe_pct_change(), which returns a
+    pnl_pct is computed via money.pct_change_x100(), which returns a
     percentage already scaled by 100 -- it is divided back to a fraction
     here so it is directly comparable to stop_loss_pct/profit_target_pct
     and so displaying it as `pnl_pct * 100` gives the real percentage.
@@ -58,7 +58,7 @@ def evaluate_exit(
       3. Max hold time
       4. Weak signal (only once min_hold_hours_before_signal has elapsed)
     """
-    pnl_pct = safe_pct_change(avg_entry, price) / 100.0 if avg_entry > 0 else 0.0
+    pnl_pct = pct_change_x100(avg_entry, price) / 100.0 if avg_entry > 0 else 0.0
 
     if price > highest_seen:
         highest_seen = price
