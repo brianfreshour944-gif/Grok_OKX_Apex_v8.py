@@ -77,7 +77,8 @@ async def scan_stable_assets(limit_scope: int = 35, candidates: list = None) -> 
 
 async def get_clean_ohlcv_dataframe(symbol):
     """
-    Fetches native 15-MINUTE bars from Alpaca and returns the last SEQUENCE_LEN.
+    Fetches native 15-MINUTE bars from Alpaca and returns them raw (up to the
+    64-bar fetch limit) — NOT truncated to SEQUENCE_LEN here.
 
     CRITICAL: This MUST match train_transformer.py's BAR_TIMEFRAME
     (TimeFrame(15, TimeFrameUnit.Minute)). The transformer was trained on
@@ -86,8 +87,23 @@ async def get_clean_ohlcv_dataframe(symbol):
     output toward ~0.5 for ALL assets (no trades ever fire). Native 15-min bars
     also have server-side VWAP already volume-weighted over the real window.
 
+    NOTE: this function deliberately does NOT truncate to SEQUENCE_LEN before
+    returning. train_transformer.py computes add_features() on the full raw
+    series and only slices out SEQUENCE_LEN-bar windows from the resulting
+    FEATURE matrix afterward -- so rolling-window features (20-bar Z-scores,
+    14-bar vol-of-vol, etc.) for early bars in each window are computed with
+    real prior history. If this function truncated to exactly SEQUENCE_LEN
+    raw bars before features are computed (as it previously did), those same
+    rolling windows would have only partial context for roughly the first
+    half of the window, producing a measurable train/serve skew in the model
+    input (verified: up to ~0.08 signal difference and BUY/no-BUY flips on
+    ~17% of trials against the live BUY_SIGNAL threshold, using the actual
+    model checkpoint). ml_predictor.predict_batch() is the one that now
+    calls add_features() on this full frame and takes tail(seq_len) of the
+    FEATURES, matching train_transformer.py's order of operations.
+
     Columns returned: open, high, low, close, volume, vwap, trade_count
-    Returns None if data is insufficient.
+    Returns None if data is insufficient (fewer than SEQUENCE_LEN valid bars).
     """
     try:
         req  = CryptoBarsRequest(
@@ -129,7 +145,7 @@ async def get_clean_ohlcv_dataframe(symbol):
         if len(df) < SEQUENCE_LEN:
             return None
 
-        return df.tail(SEQUENCE_LEN)
+        return df
 
     except Exception as e:
         logger.error(f"Data fetch error {symbol}: {e}")

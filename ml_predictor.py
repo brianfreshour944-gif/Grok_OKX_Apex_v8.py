@@ -140,12 +140,20 @@ class SafeMLPredictor:
         """
         Batch inference for multiple symbols. Takes a dict of {symbol: df}
         and returns {symbol: signal} with a single model forward pass.
+
+        df values may contain MORE than seq_len raw bars (data_feeds.py no
+        longer pre-truncates). add_features() is deliberately called on the
+        full frame BEFORE the tail(seq_len) slice below, matching
+        train_transformer.py's order of operations, so rolling-window
+        features (20-bar Z-scores etc.) for the window's early bars are
+        computed with real prior history instead of a truncated, partial
+        window -- see the note in data_feeds.get_clean_ohlcv_dataframe.
         """
         try:
             processed = {}
             tensors = []
             symbols_in_order = []
-            
+
             for symbol, df in df_dict.items():
                 df = df.copy()
                 df_features = add_features(df)
