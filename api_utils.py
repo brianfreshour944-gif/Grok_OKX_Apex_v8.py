@@ -35,7 +35,7 @@ async def call_with_rate_limit_handling(api_call_func, max_retries: int = 5, bas
     last_exception = None
     for attempt in range(max_retries):
         try:
-            return api_call_func()
+            return await asyncio.to_thread(api_call_func)
         except Exception as e:
             last_exception = e
             

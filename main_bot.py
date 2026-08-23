@@ -62,8 +62,8 @@ predictor = SafeMLPredictor(model_path=MODEL_PATH, seq_len=SEQUENCE_LEN)
 async def run_trading_mode():
     global start_equity, cooldown_until, entry_time, latest_signals, highest_prices
 
-    init_db()  # create DB tables once at startup (no-op if DATABASE_URL not set)
-    cooldown_until, entry_time, latest_signals, highest_prices = load_bot_state()
+    await asyncio.to_thread(init_db)  # create DB tables once at startup (no-op if DATABASE_URL not set)
+    cooldown_until, entry_time, latest_signals, highest_prices = await asyncio.to_thread(load_bot_state)
     sync_existing_positions(entry_time, highest_prices)
     
     # ── Startup: cancel any stale unfilled orders left over from a crash ──────────
@@ -151,7 +151,7 @@ async def run_trading_mode():
             if start_equity is None and equity > 0:
                 start_equity = equity
 
-            report_equity(BOT_NAME, equity)
+            await asyncio.to_thread(report_equity, BOT_NAME, equity)
 
             drawdown = None
             if not start_equity:
@@ -265,7 +265,10 @@ async def run_trading_mode():
 
                 # ── EXIT ───────────────────────────────────────────────────────
                 if has_position:
-                    pnl_pct    = safe_pct_change(avg_entry, price) if avg_entry > 0 else 0.0
+                    # safe_pct_change() returns a percentage (already x100); divide back
+                    # down to a fraction so the -dynamic_sl_pct comparison below and the
+                    # *100 in the log/alert strings operate on consistent units.
+                    pnl_pct    = safe_pct_change(avg_entry, price) / 100.0 if avg_entry > 0 else 0.0
                     held_hours = (now - entry_time.get(symbol, now)) / 3600
                     exit_reason = None
                     
@@ -444,7 +447,7 @@ async def run_trading_mode():
                             buys_allowed = False
             
             # Save state at the end of each cycle
-            save_bot_state(cooldown_until, entry_time, latest_signals, highest_prices)
+            await asyncio.to_thread(save_bot_state, cooldown_until, entry_time, latest_signals, highest_prices)
             
             # Periodic cleanup of stale cooldown entries (older than 1 hour)
             # to prevent unbounded memory growth from historical cooldown data

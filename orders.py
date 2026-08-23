@@ -1,5 +1,6 @@
 # orders.py — Order submission with DB logging and sell-qty precision fix.
 
+import asyncio
 import math
 from decimal import Decimal, ROUND_DOWN
 
@@ -99,7 +100,8 @@ async def place_order(symbol: str, side: OrderSide, qty: float, price: float = N
                     f"Diff: ${slippage:.4f} ({slippage_pct:+.2f}%)"
                 )
         
-        record_trade(
+        await asyncio.to_thread(
+            record_trade,
             BOT_NAME, symbol, side.value, qty, price,
             order_id=order.id, fee=actual_fee, fill_price=actual_fill_price
         )
