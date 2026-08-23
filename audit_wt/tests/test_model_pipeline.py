@@ -310,6 +310,71 @@ def test_pooled_ic_fix_matches_per_symbol_pooling():
         f"buggy={r_buggy:.4f}")
 
 
+# ── LightGBM / CatBoost backends (optional deps; skipped if not installed) ───
+def _tiny_boost_artifact(tmp_path, name, kind):
+    """Train a tiny boosted classifier of the given backend and dump it."""
+    rng = np.random.default_rng(5)
+    X = rng.normal(size=(300, 11))
+    y = (X[:, 0] + X[:, 1] > 0).astype(int)
+    if kind == "lgbm":
+        pytest.importorskip("lightgbm")
+        from lightgbm import LGBMClassifier
+        clf = LGBMClassifier(n_estimators=15, verbosity=-1,
+                             random_state=0).fit(X, y)
+    else:
+        pytest.importorskip("catboost")
+        from catboost import CatBoostClassifier
+        clf = CatBoostClassifier(iterations=15, verbose=False,
+                                 allow_writing_files=False,
+                                 random_seed=0).fit(X, y)
+    path = str(tmp_path / name)
+    joblib.dump(clf, path)
+    return path
+
+
+@pytest.mark.parametrize("kind", ["lgbm", "catboost"])
+def test_boost_backends_serve_as_champion(tmp_path, kind):
+    """A promoted LightGBM/CatBoost artifact must serve through the SAME
+    SafeMLPredictor *.joblib path with zero code changes."""
+    from ml_predictor import SafeMLPredictor
+    path = _tiny_boost_artifact(tmp_path, f"champ_{kind}.joblib", kind)
+    p = SafeMLPredictor(model_path=path, seq_len=32)
+    out = p.predict_batch({"BTC/USD": make_ohlcv(40)})
+    assert 0.0 <= out["BTC/USD"] <= 1.0
+    assert set(p.last_features["BTC/USD"].keys()) == set(FEATURE_COLS)
+
+
+@pytest.mark.parametrize("kind", ["lgbm", "catboost"])
+def test_boost_backends_work_as_shadow(tmp_path, monkeypatch, kind):
+    """LightGBM/CatBoost artifacts must load through the ShadowGBT loader."""
+    import shadow_model
+    path = _tiny_boost_artifact(tmp_path, f"shadow_{kind}.joblib", kind)
+    monkeypatch.setattr(shadow_model, "GBT_CHALLENGER_PATH", path)
+    s = shadow_model.ShadowGBT(path=path)
+    assert s.available() is True
+    row = {c: float(i % 3 - 1) for i, c in enumerate(FEATURE_COLS)}
+    prob = s.predict_row(row)
+    assert prob is not None and 0.0 <= prob <= 1.0
+
+
+def test_trainer_backend_factory():
+    from train_gbt_baseline import make_classifier
+    hgb = make_classifier("hgb")
+    assert hasattr(hgb, "predict_proba")
+    try:
+        import lightgbm  # noqa: F401
+        assert hasattr(make_classifier("lgbm"), "predict_proba")
+    except ImportError:
+        pass
+    try:
+        import catboost  # noqa: F401
+        assert hasattr(make_classifier("catboost"), "predict_proba")
+    except ImportError:
+        pass
+    with pytest.raises(ValueError):
+        make_classifier("xgboost")
+
+
 # ── main_bot wiring sanity (source-level; full loop needs live API) ──────────
 def test_main_bot_wired_for_steps_0_and_3():
     src = open(os.path.join(os.path.dirname(__file__), "..", "main_bot.py"),

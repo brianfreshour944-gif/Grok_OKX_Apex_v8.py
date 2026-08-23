@@ -33,14 +33,22 @@ computed first, then stacked. Regression-tested in
 `test_pooled_ic_fix_matches_per_symbol_pooling`.
 
 ### Step 2 — GBT baseline (`train_gbt_baseline.py`)
-Trains a HistGradientBoostingClassifier on IDENTICAL features, labels,
+Trains a gradient-boosted-tree baseline on IDENTICAL features, labels,
 horizon (6 bars / 90 min), and chronological split as the transformer.
 Fairness contract is documented in its module docstring; notably
-`early_stopping=False` because HGB's internal early stopping would carve a
-RANDOM validation split out of overlapping-window rows (leakage).
+`early_stopping=False` for HGB because its internal early stopping would
+carve a RANDOM validation split out of overlapping-window rows (leakage).
 
-    python train_gbt_baseline.py            # writes gbt_challenger.joblib
-                                            #   + .metrics.json
+Three interchangeable backends (`--model`), all sklearn-API compatible so
+the shadow loader and champion serving path accept any of them unchanged:
+
+    python train_gbt_baseline.py --model hgb       # default, no extra deps
+    python train_gbt_baseline.py --model lgbm      # pip install lightgbm
+    python train_gbt_baseline.py --model catboost  # pip install catboost
+
+Artifacts land as `gbt_challenger_<backend>.joblib` + `.metrics.json`.
+LightGBM/CatBoost are OPTIONAL dependencies — the suite skips their tests
+if they're not installed; `check_env.py` reports them as MISS, not FAIL.
 
 ### Step 3 — Shadow challenger (`shadow_model.py`)
 If `gbt_challenger.joblib` exists, the live bot scores every decision-time

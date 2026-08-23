@@ -31,6 +31,16 @@ Usage:
 Output:
     gbt_challenger.joblib   (or --out)      — the model artifact
     <artifact>.metrics.json              — honest val metrics + dataset stats
+
+Backends (--model):
+    hgb      scikit-learn HistGradientBoostingClassifier (default)
+    lgbm     LightGBM LGBMClassifier        (pip install lightgbm)
+    catboost CatBoostClassifier             (pip install catboost)
+
+All three consume IDENTICAL features/labels/split — only the learner
+changes. Every backend exposes the sklearn predict_proba interface, so the
+shadow loader (shadow_model.py) and the champion serving path
+(SafeMLPredictor *.joblib) accept any of them with zero code changes.
 """
 
 import argparse
@@ -83,12 +93,52 @@ def build_dataset(client, symbols, days) -> pd.DataFrame:
     return data.sort_values("ts").reset_index(drop=True)
 
 
+def make_classifier(kind: str):
+    """Factory for the selectable GBT backends. All are sklearn-API
+    compatible (fit / predict_proba / classes_) so downstream tooling is
+    backend-agnostic."""
+    if kind == "hgb":
+        from sklearn.ensemble import HistGradientBoostingClassifier
+        return HistGradientBoostingClassifier(
+            max_iter=400, learning_rate=0.05, max_leaf_nodes=15,
+            min_samples_leaf=40, l2_regularization=1.0,
+            early_stopping=False,       # no random internal split (leakage)
+            random_state=42,
+        )
+    if kind == "lgbm":
+        try:
+            from lightgbm import LGBMClassifier
+        except ImportError as e:
+            raise SystemExit("lightgbm not installed — pip install lightgbm") from e
+        return LGBMClassifier(
+            n_estimators=400, learning_rate=0.05, num_leaves=15,
+            min_child_samples=40, reg_lambda=1.0,
+            random_state=42, verbosity=-1,
+        )
+    if kind == "catboost":
+        try:
+            from catboost import CatBoostClassifier
+        except ImportError as e:
+            raise SystemExit("catboost not installed — pip install catboost") from e
+        return CatBoostClassifier(
+            iterations=400, learning_rate=0.05, depth=6,
+            l2_leaf_reg=1.0, loss_function="Logloss",
+            random_seed=42, verbose=False, allow_writing_files=False,
+        )
+    raise ValueError(f"unknown backend: {kind}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=int, default=180,
                     help="Days of 15-min history per symbol (default 180)")
-    ap.add_argument("--out", default="gbt_challenger.joblib")
+    ap.add_argument("--model", default="hgb", choices=["hgb", "lgbm", "catboost"],
+                    help="GBT backend (default hgb)")
+    ap.add_argument("--out", default=None,
+                    help="Artifact path (default gbt_challenger_<model>.joblib)")
     args = ap.parse_args()
+    if args.out is None:
+        args.out = f"gbt_challenger_{args.model}.joblib"
 
     print(f"── GBT baseline trainer ── horizon={TARGET_HORIZON} bars "
           f"(90 min), warmup={WARMUP_BARS}, split={TRAIN_FRAC:.0%}/{1 - TRAIN_FRAC:.0%}")
@@ -106,12 +156,7 @@ def main():
           f"up-rate train={y_tr.mean():.3f} val={y_va.mean():.3f}")
     print(f"Time span: {data['ts'].iloc[0]} → {data['ts'].iloc[-1]}")
 
-    clf = HistGradientBoostingClassifier(
-        max_iter=400, learning_rate=0.05, max_leaf_nodes=15,
-        min_samples_leaf=40, l2_regularization=1.0,
-        early_stopping=False,       # see module docstring: no random internal split
-        random_state=42,
-    )
+    clf = make_classifier(args.model)
     clf.fit(X_tr, y_tr)
 
     proba = clf.predict_proba(X_va)[:, list(clf.classes_).index(1)]
