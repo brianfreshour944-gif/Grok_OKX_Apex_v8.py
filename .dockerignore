@@ -28,6 +28,11 @@ tests/
 .pytest_cache/
 requirements-dev.txt
 
+# Standalone model-improvement pipeline worktree -- not imported by
+# main_bot.py (the actual Docker CMD / live entry point) anywhere; verified
+# via grep, zero references. Shipping it just bloats the image (~630KB).
+audit_wt/
+
 # Local IDE/editor files
 .vscode/
 .idea/
