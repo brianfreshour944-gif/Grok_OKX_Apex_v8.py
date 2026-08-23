@@ -22,16 +22,20 @@ class FakeApiError(Exception):
 
 def test_does_not_block_the_event_loop():
     """
-    Wraps a synchronous 150ms blocking call and runs a concurrent 10ms
-    heartbeat alongside it. If the wrapper doesn't actually offload to a
-    thread, the heartbeat will show one large gap (~150ms) instead of many
-    small ones (~10ms).
+    Wraps a synchronous blocking call and runs a concurrent heartbeat
+    alongside it, then compares the heartbeat gap against a deliberately-
+    blocking control measured in the SAME run/environment -- rather than a
+    fixed absolute-ms threshold, which is exactly the kind of test that
+    flakes under CI/system scheduling jitter (this one did, once, on a
+    loaded local machine: 454ms vs an 80ms threshold, on code that is
+    correct). Comparing relative to a same-run control cancels out overall
+    system speed/jitter, since it affects both measurements alike.
     """
     def blocking_call():
-        time.sleep(0.15)
+        time.sleep(0.2)
         return "ok"
 
-    async def scenario():
+    async def measure_max_heartbeat_gap(offload: bool) -> float:
         ticks = []
         stop = asyncio.Event()
 
@@ -42,17 +46,28 @@ def test_does_not_block_the_event_loop():
 
         hb = asyncio.create_task(heartbeat())
         await asyncio.sleep(0.03)
-        result = await call_with_rate_limit_handling_async(blocking_call, max_retries=1)
+        if offload:
+            await call_with_rate_limit_handling_async(blocking_call, max_retries=1)
+        else:
+            blocking_call()  # deliberately blocks the loop -- the control
         await asyncio.sleep(0.03)
         stop.set()
         await hb
 
         gaps = [b - a for a, b in zip(ticks, ticks[1:])]
-        return result, (max(gaps) if gaps else 0.0)
+        return max(gaps) if gaps else 0.0
 
-    result, max_gap = run_async(scenario())
-    assert result == "ok"
-    assert max_gap < 0.08, f"event loop was blocked for {max_gap*1000:.0f}ms -- call ran on the loop, not a thread"
+    real_gap    = run_async(measure_max_heartbeat_gap(offload=True))
+    control_gap = run_async(measure_max_heartbeat_gap(offload=False))
+
+    assert control_gap > 0.15, (
+        f"control (deliberately blocking) only showed a {control_gap*1000:.0f}ms gap -- "
+        f"test setup itself is broken, this should have blocked for ~200ms"
+    )
+    assert real_gap < control_gap / 2, (
+        f"event loop was blocked for {real_gap*1000:.0f}ms vs a {control_gap*1000:.0f}ms "
+        f"control -- call likely ran on the loop, not a thread"
+    )
 
 
 def test_retries_on_429_then_succeeds():

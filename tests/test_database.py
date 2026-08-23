@@ -80,6 +80,38 @@ def test_record_trade_is_a_noop_without_database_url(monkeypatch):
     assert not mock_connect.called
 
 
+# ── save_bot_state: dynamic universe means the symbol set isn't fixed ──
+
+def test_save_bot_state_persists_a_symbol_outside_any_fixed_list(mock_db):
+    """
+    With a dynamic universe, save_bot_state can't just iterate config.SYMBOLS
+    (a static 3-symbol list) -- it must persist state for whatever symbols
+    actually have state, including ones a static list would never contain.
+    """
+    database.save_bot_state(
+        cooldown_until={"XRP/USD": 100.0},
+        entry_time={"XRP/USD": 90.0},
+        latest_signals={},
+        highest_prices={},
+    )
+    calls = [c for c in mock_db.execute.call_args_list if "INSERT INTO bot_state" in c.args[0]]
+    assert len(calls) == 1
+    assert calls[0].args[1][0] == "XRP/USD"
+
+
+def test_save_bot_state_persists_the_union_of_all_four_dicts(mock_db):
+    database.save_bot_state(
+        cooldown_until={"BTC/USD": 1.0},
+        entry_time={"ETH/USD": 2.0},
+        latest_signals={"SOL/USD": 0.6},
+        highest_prices={"DOGE/USD": 0.1},
+    )
+    symbols_written = {
+        c.args[1][0] for c in mock_db.execute.call_args_list if "INSERT INTO bot_state" in c.args[0]
+    }
+    assert symbols_written == {"BTC/USD", "ETH/USD", "SOL/USD", "DOGE/USD"}
+
+
 def test_get_realized_pnl_summary_returns_none_without_database_url(monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     assert database.get_realized_pnl_summary("bot") is None

@@ -5,7 +5,7 @@
 import os
 import psycopg2
 import json
-from config import logger, BOT_NAME, SYMBOLS
+from config import logger, BOT_NAME
 
 
 def _init_bot_status_table(cur):
@@ -113,14 +113,21 @@ def init_db():
 
 
 def save_bot_state(cooldown_until, entry_time, latest_signals, highest_prices):
-    """Save the bot's state to the database."""
+    """
+    Save the bot's state to the database.
+
+    Iterates the union of keys across all four dicts rather than a fixed
+    symbol list -- with a dynamic trading universe, the set of symbols with
+    state to persist changes over time and isn't known statically.
+    """
     db_url = os.getenv("DATABASE_URL")
     if not db_url:
         return
+    all_symbols = set(cooldown_until) | set(entry_time) | set(latest_signals) | set(highest_prices)
     try:
         with psycopg2.connect(db_url) as conn:
             with conn.cursor() as cur:
-                for symbol in SYMBOLS:
+                for symbol in all_symbols:
                     cur.execute("""
                         INSERT INTO bot_state (symbol, cooldown_until, entry_time, latest_signal, highest_price)
                         VALUES (%s, %s, %s, %s, %s)

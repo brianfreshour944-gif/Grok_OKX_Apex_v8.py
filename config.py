@@ -32,9 +32,27 @@ SLEEP_PER_LOOP        = 40
 HEARTBEAT_PATH        = os.getenv("HEARTBEAT_PATH", "/tmp/bot_heartbeat.txt")
 
 # ── Universe ───────────────────────────────────────────────────────────────────
+# SYMBOLS is the historical static universe. main_bot.py no longer uses it to
+# decide what to trade (see DYNAMIC_UNIVERSE_CANDIDATES below) -- it's kept
+# here because train_transformer.py's own TRAIN_SYMBOLS and several
+# diagnostic/backtest scripts still reference it directly.
 SYMBOLS = [
     "BTC/USD", "ETH/USD", "SOL/USD"
 ]
+
+# The model (grok_gqa_v9_best.pth) was trained on exactly these 10 symbols
+# via train_transformer.py's TRAIN_SYMBOLS -- keep the two lists in sync.
+# The live bot's dynamic universe is restricted to this pool rather than
+# data_feeds.scan_stable_assets()'s full 24-symbol candidate list, because
+# feature_scaler.pkl was only fit on these symbols' feature distributions;
+# trading an asset the scaler never saw risks out-of-distribution inputs.
+DYNAMIC_UNIVERSE_CANDIDATES = [
+    "BTC/USD", "ETH/USD", "SOL/USD", "DOGE/USD",
+    "LTC/USD", "AVAX/USD", "LINK/USD", "ADA/USD",
+    "BCH/USD", "DOT/USD",
+]
+UNIVERSE_SIZE            = 5     # how many of the above are actively open to new entries at once
+UNIVERSE_REFRESH_SECONDS = 3600  # rescan cadence for 24h-volume ranking (1 hour)
 
 # ── Risk / sizing ──────────────────────────────────────────────────────────────
 ACCOUNT_BASE         = float(os.getenv("ACCOUNT_BASE", 10000))

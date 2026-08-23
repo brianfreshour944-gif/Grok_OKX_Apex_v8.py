@@ -24,14 +24,15 @@ from config import (
     MIN_HOLD_HOURS_BEFORE_SIGNAL, BUY_SIGNAL,
     COOLDOWN_SECONDS_BUY, COOLDOWN_SECONDS_SELL, SLEEP_PER_LOOP,
     TRAILING_STOP_ATR_MULTIPLIER, MIN_TRAILING_STOP_PCT, MAX_TRAILING_STOP_PCT,
-    get_regime_params, fmt_price, trading_client, SYMBOLS,
+    DYNAMIC_UNIVERSE_CANDIDATES, UNIVERSE_SIZE, UNIVERSE_REFRESH_SECONDS,
+    get_regime_params, fmt_price, trading_client,
 )
 from database import report_equity, init_db, save_bot_state, load_bot_state
-from data_feeds import get_clean_ohlcv_dataframe, get_orderbook_with_retry
+from data_feeds import get_clean_ohlcv_dataframe, get_orderbook_with_retry, scan_stable_assets
 from regime import compute_regime_and_trend, calculate_adjusted_risk
 from portfolio import (
     get_all_positions_async, get_buying_power_async,
-    sync_existing_positions, normalize_symbol,
+    sync_existing_positions, normalize_symbol, denormalize_symbol,
     swap_weakest_position, sell_largest_position, cancel_stale_orders_async, write_heartbeat,
     calculate_kelly_multiplier
 )
@@ -80,9 +81,13 @@ async def run_trading_mode():
     logger.info("🚀 Grok Apex Ironclad Bot v9 - Cutting Edge Started")
 
     # ── Startup cleanup: close any positions in symbols we no longer trade ──────
+    # Checked against the full DYNAMIC_UNIVERSE_CANDIDATES pool, not just
+    # whichever symbols happen to be in this hour's active rotation --
+    # otherwise a position bought while its symbol was in the top-N would get
+    # force-liquidated on every restart the moment it rotates out.
     try:
         all_pos = await asyncio.to_thread(trading_client.get_all_positions)
-        active_alpaca_syms = {normalize_symbol(s) for s in SYMBOLS}
+        active_alpaca_syms = {normalize_symbol(s) for s in DYNAMIC_UNIVERSE_CANDIDATES}
         for p in all_pos:
             market_val = float(p.market_value)
             if p.symbol not in active_alpaca_syms:
@@ -133,6 +138,12 @@ async def run_trading_mode():
                     logger.info(f"✅ Synced starting_equity to ${start_equity or 0:.2f} in database")
         except Exception as e:
             logger.warning(f"⚠️ Could not sync starting_equity: {e}")
+
+    # Dynamic universe state. last_universe_scan starts at 0.0 so the very
+    # first cycle always scans immediately rather than waiting a full
+    # UNIVERSE_REFRESH_SECONDS with an empty universe.
+    active_universe    = []
+    last_universe_scan = 0.0
 
     while True:
         try:
@@ -205,9 +216,31 @@ async def run_trading_mode():
                 logger.info(f"🛑 Max positions reached ({open_count}/{MAX_OPEN_POSITIONS}). Holding off on buys.")
                 buys_allowed = False
 
-            # Use SYMBOLS directly — no need to scan 18 assets when we only trade 3
             now = time.time()
-            symbols_to_process = SYMBOLS
+
+            if now - last_universe_scan >= UNIVERSE_REFRESH_SECONDS:
+                try:
+                    active_universe = await scan_stable_assets(
+                        limit_scope=UNIVERSE_SIZE, candidates=DYNAMIC_UNIVERSE_CANDIDATES
+                    )
+                    last_universe_scan = now
+                    logger.info(
+                        f"🔍 Universe refreshed ({len(active_universe)} of "
+                        f"{len(DYNAMIC_UNIVERSE_CANDIDATES)} candidates by 24h volume): {active_universe}"
+                    )
+                except Exception as e:
+                    logger.warning(f"⚠️ Universe scan failed, keeping previous universe {active_universe}: {e}")
+
+            # Any symbol we currently hold must stay under exit management even
+            # if it has since rotated out of the active entry universe --
+            # otherwise a position could go unmonitored (no stop-loss/trailing
+            # stop checks) purely because its volume rank dropped.
+            held_symbols = {
+                denormalize_symbol(alpaca_sym)
+                for alpaca_sym, p in current_positions.items()
+                if p["market_value"] >= MIN_POSITION_USD
+            }
+            symbols_to_process = list(dict.fromkeys(active_universe + list(held_symbols)))
 
             # PARALLEL FETCH: Fetch all OHLCV dataframes concurrently
             fetch_tasks = [get_clean_ohlcv_dataframe(sym) for sym in symbols_to_process]

@@ -23,18 +23,26 @@ async def get_orderbook_with_retry(symbol: str, retries: int = 3, backoff: float
                 raise
             await asyncio.sleep(backoff * (2 ** attempt))
 
-async def scan_stable_assets(limit_scope: int = 35) -> list:
+DEFAULT_SCAN_CANDIDATES = [
+    "BTC/USD", "ETH/USD", "SOL/USD", "DOGE/USD", "LTC/USD", "BCH/USD",
+    "LINK/USD", "UNI/USD", "AVAX/USD", "DOT/USD", "AAVE/USD", "ADA/USD",
+    "SHIB/USD", "ATOM/USD", "GRT/USD", "MKR/USD", "COMP/USD", "NEAR/USD",
+    "XRP/USD", "BAT/USD", "CRV/USD", "SUSHI/USD", "XTZ/USD", "YFI/USD",
+]
+
+
+async def scan_stable_assets(limit_scope: int = 35, candidates: list = None) -> list:
     """
     Dynamically scans Alpaca for the top crypto assets by 24-hour dollar volume.
     Returns a list of symbols (e.g., 'BTC/USD') limited to `limit_scope`.
     Falls back to a safe 3-symbol list if the scan fails entirely.
+
+    `candidates` defaults to DEFAULT_SCAN_CANDIDATES (24 broadly-liquid pairs);
+    pass a narrower list (e.g. config.DYNAMIC_UNIVERSE_CANDIDATES) to restrict
+    the scan to assets the live model was actually trained on.
     """
-    candidates = [
-        "BTC/USD", "ETH/USD", "SOL/USD", "DOGE/USD", "LTC/USD", "BCH/USD",
-        "LINK/USD", "UNI/USD", "AVAX/USD", "DOT/USD", "AAVE/USD", "ADA/USD",
-        "SHIB/USD", "ATOM/USD", "GRT/USD", "MKR/USD", "COMP/USD", "NEAR/USD",
-        "XRP/USD", "BAT/USD", "CRV/USD", "SUSHI/USD", "XTZ/USD", "YFI/USD",
-    ]
+    if candidates is None:
+        candidates = DEFAULT_SCAN_CANDIDATES
     try:
         volume_data = []
         start_time  = datetime.now() - timedelta(days=1)

@@ -6,7 +6,7 @@ import time
 from alpaca.trading.enums import OrderSide
 
 from config import (
-    logger, trading_client, SYMBOLS, MIN_POSITION_USD, HEARTBEAT_PATH
+    logger, trading_client, MIN_POSITION_USD, HEARTBEAT_PATH
 )
 from orders import place_order
 
@@ -17,6 +17,20 @@ sell_retry_cooldown: dict = {}
 def normalize_symbol(symbol: str) -> str:
     """Convert 'BTC/USD' -> 'BTCUSD' to match Alpaca's position key format."""
     return symbol.replace("/", "")
+
+
+def denormalize_symbol(alpaca_sym: str) -> str:
+    """
+    Convert 'BTCUSD' -> 'BTC/USD'. Assumes a 3-letter USD quote currency,
+    true for every pair this bot has ever traded.
+
+    Used instead of reverse-searching a fixed symbol list (e.g. SYMBOLS or
+    DYNAMIC_UNIVERSE_CANDIDATES) so that a position held in a symbol that
+    has since rotated OUT of the current dynamic universe is still
+    recognized and kept under exit management, rather than silently
+    dropped from monitoring because it's no longer in "the list".
+    """
+    return f"{alpaca_sym[:-3]}/{alpaca_sym[-3:]}"
 
 
 def get_all_positions() -> dict:
@@ -149,24 +163,22 @@ def sync_existing_positions(entry_time: dict, highest_prices: dict) -> None:
         return
 
     for alpaca_sym, data in positions.items():
-        for sym in SYMBOLS:
-            if normalize_symbol(sym) == alpaca_sym:
-                if sym not in entry_time:
-                    entry_time[sym] = time.time()
-                    logger.info(f"   Seeded entry_time for {sym} (was missing after restart)")
-                if sym not in highest_prices:
-                    # Seed highest_prices from current exchange price so the trailing
-                    # stop baseline reflects the actual market price at restart,
-                    # not just the original entry. Using max() ensures we never
-                    # set a peak below current price (which would trigger an
-                    # immediate false trailing-stop sell).
-                    highest_prices[sym] = max(data["avg_entry"], data["current_price"])
-                    logger.info(f"   Seeded highest_prices for {sym} from exchange (price={data['current_price']:.4f})")
-                logger.info(
-                    f"Renewing: {sym} | qty={data['qty']:.6f} | "
-                    f"avg_entry=${data['avg_entry']:.4f}"
-                )
-                break
+        sym = denormalize_symbol(alpaca_sym)
+        if sym not in entry_time:
+            entry_time[sym] = time.time()
+            logger.info(f"   Seeded entry_time for {sym} (was missing after restart)")
+        if sym not in highest_prices:
+            # Seed highest_prices from current exchange price so the trailing
+            # stop baseline reflects the actual market price at restart,
+            # not just the original entry. Using max() ensures we never
+            # set a peak below current price (which would trigger an
+            # immediate false trailing-stop sell).
+            highest_prices[sym] = max(data["avg_entry"], data["current_price"])
+            logger.info(f"   Seeded highest_prices for {sym} from exchange (price={data['current_price']:.4f})")
+        logger.info(
+            f"Renewing: {sym} | qty={data['qty']:.6f} | "
+            f"avg_entry=${data['avg_entry']:.4f}"
+        )
 
 
 def _select_weakest_position_to_swap(new_symbol: str, new_signal: float, latest_signals: dict, threshold: float):
@@ -186,10 +198,7 @@ def _select_weakest_position_to_swap(new_symbol: str, new_signal: float, latest_
         weakest_data = None
 
         for alpaca_sym, p_data in positions.items():
-            # Reverse map from alpaca_sym to standard symbol
-            held_sym = next((s for s in SYMBOLS if normalize_symbol(s) == alpaca_sym), None)
-            if not held_sym:
-                continue
+            held_sym = denormalize_symbol(alpaca_sym)
 
             # Fallback to 0.5 if we don't have a recent signal for the held asset
             held_signal = latest_signals.get(held_sym, 0.5)

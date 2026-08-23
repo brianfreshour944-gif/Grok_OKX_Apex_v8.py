@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from portfolio import (
-    normalize_symbol, calculate_kelly_multiplier,
+    normalize_symbol, denormalize_symbol, calculate_kelly_multiplier,
     sell_largest_position, swap_weakest_position, sync_existing_positions,
     sell_retry_cooldown,
 )
@@ -16,6 +16,21 @@ from conftest import run_async
 def test_normalize_symbol():
     assert normalize_symbol("BTC/USD") == "BTCUSD"
     assert normalize_symbol("ETHUSD") == "ETHUSD"
+
+
+def test_denormalize_symbol():
+    assert denormalize_symbol("BTCUSD") == "BTC/USD"
+    assert denormalize_symbol("DOGEUSD") == "DOGE/USD"
+
+
+@pytest.mark.parametrize("symbol", ["BTC/USD", "ETH/USD", "SOL/USD", "DOGE/USD", "AVAX/USD"])
+def test_normalize_denormalize_are_inverses(symbol):
+    """
+    This is what lets a held position survive its symbol rotating out of the
+    dynamic universe: denormalize_symbol() reconstructs the standard symbol
+    structurally, without needing to look it up in any fixed candidate list.
+    """
+    assert denormalize_symbol(normalize_symbol(symbol)) == symbol
 
 
 # ── Kelly multiplier ──
@@ -123,9 +138,7 @@ def test_sell_largest_position_records_realized_pnl(mock_trading_client):
 
 # ── swap_weakest_position ──
 
-def test_swap_weakest_position_sells_the_lowest_signal_holding(mock_trading_client, monkeypatch):
-    import portfolio
-    monkeypatch.setattr(portfolio, "SYMBOLS", ["BTC/USD", "ETH/USD"])
+def test_swap_weakest_position_sells_the_lowest_signal_holding(mock_trading_client):
     mock_trading_client.get_all_positions.return_value = [
         _mock_position("BTCUSD", "5000", "0.1", "50000", "48000"),
         _mock_position("ETHUSD", "2000", "1.0", "2000", "1900"),
@@ -141,9 +154,7 @@ def test_swap_weakest_position_sells_the_lowest_signal_holding(mock_trading_clie
     assert order_data.symbol == "ETHUSD"
 
 
-def test_swap_weakest_position_does_nothing_below_threshold(mock_trading_client, monkeypatch):
-    import portfolio
-    monkeypatch.setattr(portfolio, "SYMBOLS", ["BTC/USD"])
+def test_swap_weakest_position_does_nothing_below_threshold(mock_trading_client):
     mock_trading_client.get_all_positions.return_value = [
         _mock_position("BTCUSD", "5000", "0.1", "50000", "48000"),
     ]
@@ -155,9 +166,7 @@ def test_swap_weakest_position_does_nothing_below_threshold(mock_trading_client,
     assert not mock_trading_client.submit_order.called
 
 
-def test_swap_weakest_position_returns_zero_on_sell_failure(mock_trading_client, monkeypatch):
-    import portfolio
-    monkeypatch.setattr(portfolio, "SYMBOLS", ["BTC/USD"])
+def test_swap_weakest_position_returns_zero_on_sell_failure(mock_trading_client):
     mock_trading_client.get_all_positions.return_value = [
         _mock_position("BTCUSD", "5000", "0.1", "50000", "48000"),
     ]
@@ -171,9 +180,7 @@ def test_swap_weakest_position_returns_zero_on_sell_failure(mock_trading_client,
 
 # ── sync_existing_positions ──
 
-def test_sync_existing_positions_seeds_missing_state(mock_trading_client, monkeypatch):
-    import portfolio
-    monkeypatch.setattr(portfolio, "SYMBOLS", ["BTC/USD"])
+def test_sync_existing_positions_seeds_missing_state(mock_trading_client):
     mock_trading_client.get_all_positions.return_value = [
         MagicMock(symbol="BTCUSD", qty=0.1, avg_entry_price=50000.0, market_value=5100.0, current_price=51000.0),
     ]
@@ -185,9 +192,7 @@ def test_sync_existing_positions_seeds_missing_state(mock_trading_client, monkey
     assert highest_prices["BTC/USD"] == pytest.approx(51000.0)
 
 
-def test_sync_existing_positions_cleans_up_closed_positions(mock_trading_client, monkeypatch):
-    import portfolio
-    monkeypatch.setattr(portfolio, "SYMBOLS", ["BTC/USD", "ETH/USD"])
+def test_sync_existing_positions_cleans_up_closed_positions(mock_trading_client):
     mock_trading_client.get_all_positions.return_value = [
         MagicMock(symbol="BTCUSD", qty=0.1, avg_entry_price=50000.0, market_value=5100.0, current_price=51000.0),
     ]
