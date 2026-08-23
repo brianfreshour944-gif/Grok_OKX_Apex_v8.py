@@ -1,8 +1,18 @@
 name: Cloud Backtest (Regime Windows)
 
+# NOTE: this was previously `on: push` for [main, master], meaning it ran
+# on EVERY push to main and was guaranteed to fail at the "Install freqtrade"
+# step -- there is no freqtrade/ directory anywhere in this repository (nor
+# a user_data/ directory for the upload step), so `pip install -e ./freqtrade`
+# always errors with "No such file or directory". regime_windows_backtest.py
+# hard-codes the same nonexistent paths (freqtrade/config.backtest.json,
+# user_data/strategies). Freqtrade is a separate, unrelated trading-bot
+# framework -- this looks like a leftover/copy-pasted workflow that was never
+# actually wired up to this Alpaca/PyTorch bot. Restricted to manual dispatch
+# so it stops guaranteeing a red CI check on every push; re-add the `push`
+# trigger once (or if) the freqtrade/ and user_data/ directories this
+# workflow depends on actually exist in the repo.
 on:
-  push:
-    branches: [main, master]
   workflow_dispatch:
 
 jobs:
