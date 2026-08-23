@@ -502,7 +502,15 @@ async def run_trading_mode():
             await asyncio.sleep(SLEEP_PER_LOOP)
 
         except Exception as e:
-            logger.error(f"Critical loop error: {e}")
+            # logger.exception (not logger.error) so the traceback -- not
+            # just the exception's string -- lands in the logs. This is the
+            # blanket catch-all around the whole trading cycle: if a bug
+            # ever causes a call to silently fail here (e.g. a future edit
+            # accidentally mismatches an async/await pair), logger.error's
+            # bare message alone wouldn't show WHERE it happened, and the
+            # bot would just log this same generic line forever every 30s
+            # while looking "alive" in the logs.
+            logger.exception(f"Critical loop error: {e}")
             await asyncio.sleep(30)
 
 
