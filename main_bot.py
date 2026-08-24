@@ -39,6 +39,7 @@ from exit_logic import evaluate_exit
 from notifications import send_discord_alert
 from ml_predictor import SafeMLPredictor
 from money import mul, div, qty as money_qty
+from experience_capture import log_entry_experience, log_exit_outcome
 
 # --- Global state ---
 cooldown_until: dict = {}
@@ -345,6 +346,20 @@ async def run_trading_mode():
                             ))
                             cooldown_until[symbol] = now + COOLDOWN_SECONDS_SELL
                             mark_pending_exit(symbol)
+                            # Step 0: record the realized outcome paired with
+                            # this position's decision-time context. The
+                            # matching entry row (with features) was logged at
+                            # BUY time; training joins them by symbol/time.
+                            log_exit_outcome(
+                                symbol,
+                                avg_entry=float(avg_entry),
+                                price=float(price),
+                                qty=float(qty_held),
+                                exit_reason=str(exit_reason),
+                                regime=regime,
+                                held_hours=float(held_hours),
+                                pnl_pct=float(pnl_pct),
+                            )
                             # We deliberately DO NOT pop entry_time or highest_prices here.
                             # If the order fails or gets canceled, we want to retain the hold-time and peak price.
                     else:
@@ -475,6 +490,21 @@ async def run_trading_mode():
                         highest_prices[symbol]    = price
                         running_portfolio_value  += trade_value
                         open_count               += 1
+                        # Step 0: snapshot the EXACT feature vector + context
+                        # this buy decision was made on. predictor.last_features
+                        # holds the raw last-row vector from this cycle's
+                        # predict_batch() call for this symbol.
+                        log_entry_experience(
+                            symbol,
+                            signal=signal,
+                            regime=regime,
+                            trend=trend,
+                            atr_pct=atr_pct,
+                            price=float(price),
+                            qty=float(qty),
+                            trade_value=float(trade_value),
+                            features=predictor.last_features.get(symbol),
+                        )
                         if open_count >= MAX_OPEN_POSITIONS:
                             logger.info("🔒 Max positions reached — no more buys this cycle.")
                             buys_allowed = False
