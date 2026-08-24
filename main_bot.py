@@ -39,7 +39,8 @@ from exit_logic import evaluate_exit
 from notifications import send_discord_alert
 from ml_predictor import SafeMLPredictor
 from money import mul, div, qty as money_qty
-from experience_capture import log_entry_experience, log_exit_outcome
+from experience_capture import log_entry_experience, log_exit_outcome, log_shadow_prediction
+from shadow_model import get_shadow_gbt
 
 # --- Global state ---
 cooldown_until: dict = {}
@@ -285,6 +286,28 @@ async def run_trading_mode():
 
                 if price <= 0:
                     continue
+
+                # ── Step 3: SHADOW challenger inference (never trades) ────────
+                # If a GBT challenger artifact exists, score the SAME
+                # decision-time feature row the champion just used and log
+                # both probabilities for the step-4 bake-off. Failures here
+                # are non-fatal and must never affect trading decisions.
+                try:
+                    _shadow = get_shadow_gbt()
+                    if _shadow.available():
+                        _feat_row = predictor.last_features.get(symbol)
+                        _gbt_prob = _shadow.predict_row(_feat_row)
+                        log_shadow_prediction(
+                            symbol,
+                            gbt_prob=_gbt_prob,
+                            transformer_signal=signal,
+                            regime=regime,
+                            trend=trend,
+                            atr_pct=atr_pct,
+                            price=float(price),
+                        )
+                except Exception as sh_err:
+                    logger.debug(f"Shadow inference skipped for {symbol}: {sh_err}")
 
                 pos_data     = current_positions.get(alpaca_sym)
                 has_position = (
