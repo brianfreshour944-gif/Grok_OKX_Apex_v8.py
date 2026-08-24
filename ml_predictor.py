@@ -105,45 +105,132 @@ class GrokGQA_Transformer(nn.Module):
 # ==============================================================================
 
 class SafeMLPredictor:
+    """
+    Serves either the transformer champion (*.pth) or a promoted sklearn/GBT
+    champion (*.joblib/*.pkl) through the same interface -- so a GBT model
+    that wins the walk-forward promotion gate (promotion_gate.py) can become
+    MODEL_PATH with zero code changes on the serving side.
+
+    Hot-reload (step 5): every predict_batch() call stats the model (and
+    scaler, for the torch path) files; if either mtime changed since load,
+    the artifact is reloaded in place. A failed reload NEVER takes down the
+    caller -- the previously-loaded weights keep serving and the error is
+    printed once; the next file change retries. Without this, a
+    successfully validated and promoted model would sit on disk unused
+    until the process is restarted -- the same "validated model never
+    reaches the running process" failure mode documented in this bot's
+    sibling repo, just simpler here since there's no live-reload path at
+    all otherwise.
+    """
+
     def __init__(
         self, model_path="grok_gqa_v9_best.pth", input_dim=11, seq_len=32,
         embed_dim=128, num_layers=4, num_q_heads=8, num_kv_heads=2,
         dropout=0.0
     ):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Model file not found at {model_path}")
-
-        self.model = GrokGQA_Transformer(
-            input_dim=input_dim, seq_len=seq_len,
-            embed_dim=embed_dim, num_layers=num_layers,
-            num_q_heads=num_q_heads, num_kv_heads=num_kv_heads,
-            dropout=dropout
-        ).to(self.device)
-
-        try:
-            self.model.load_state_dict(torch.load(model_path, map_location=self.device), strict=True)
-            print(f"✅ Model weights loaded from {model_path}")
-        except Exception as e:
-            # Fail loudly rather than silently continuing with a partially-
-            # initialized (effectively random-weight) model.
-            print(f"❌ Model state dict load failed: {e}")
-            raise
-
+        self.model_path = model_path
         self.seq_len = seq_len
+        self._torch_kwargs = dict(
+            input_dim=input_dim, seq_len=seq_len, embed_dim=embed_dim,
+            num_layers=num_layers, num_q_heads=num_q_heads,
+            num_kv_heads=num_kv_heads, dropout=dropout,
+        )
+        # Decision-time feature snapshots, populated by predict_batch().
+        # {symbol: {feature_col: value}} -- the RAW (unscaled) last-row
+        # vector the model actually saw, consumed by experience_capture.py
+        # (step 0) so training/promotion tools have real labeled data.
+        self.last_features: dict = {}
 
-        scaler_path = os.path.join(os.path.dirname(model_path), 'feature_scaler.pkl')
+        self._kind = None      # "torch" | "sklearn"
+        self.model = None      # torch module (kind == "torch")
+        self.clf = None        # sklearn estimator (kind == "sklearn")
         self.scaler = None
-        if os.path.exists(scaler_path):
-            self.scaler = joblib.load(scaler_path)
-            print(f"✅ Scaler loaded from {scaler_path}")
+        self._sig = None       # (path, mtime[, scaler_path, scaler_mtime]) watched for reload
+
+        self._load()
+
+    # ── loading / hot-reload ────────────────────────────────────────────────
+    def _scaler_path(self) -> str:
+        return os.path.join(os.path.dirname(self.model_path) or ".", "feature_scaler.pkl")
+
+    def _current_sig(self):
+        sig = [self.model_path, os.path.getmtime(self.model_path)]
+        sp = self._scaler_path()
+        if self._kind == "torch" and os.path.exists(sp):
+            sig.append(sp)
+            sig.append(os.path.getmtime(sp))
+        return tuple(sig)
+
+    def _load(self):
+        """Load artifacts into LOCALS first and commit to self only after
+        every step succeeded -- a failed hot-reload must leave the
+        previously loaded weights serving, never a half-built random-weight
+        model."""
+        if not os.path.exists(self.model_path):
+            raise FileNotFoundError(f"Model file not found at {self.model_path}")
+
+        ext = os.path.splitext(self.model_path)[1].lower()
+        if ext in (".joblib", ".pkl"):
+            clf = joblib.load(self.model_path)   # may raise -> nothing mutated
+            kind, model, scaler = "sklearn", None, None
+            print(f"✅ Sklearn champion loaded from {self.model_path}")
         else:
-            print(
-                f"⚠️  Scaler file '{scaler_path}' not found.\n"
-                f"   Predictions will be unreliable without normalisation.\n"
-                f"   Re-run train_transformer.py to generate feature_scaler.pkl."
-            )
+            model = GrokGQA_Transformer(**self._torch_kwargs).to(self.device)
+            try:
+                model.load_state_dict(
+                    torch.load(self.model_path, map_location=self.device),
+                    strict=True,
+                )
+                print(f"✅ Model weights loaded from {self.model_path}")
+            except Exception as e:
+                # Fail loudly rather than silently continuing with a partially-
+                # initialized (effectively random-weight) model.
+                print(f"❌ Model state dict load failed: {e}")
+                raise
+
+            scaler = None
+            scaler_path = self._scaler_path()
+            if os.path.exists(scaler_path):
+                scaler = joblib.load(scaler_path)
+                print(f"✅ Scaler loaded from {scaler_path}")
+            else:
+                print(
+                    f"⚠️  Scaler file '{scaler_path}' not found.\n"
+                    f"   Predictions will be unreliable without normalisation.\n"
+                    f"   Re-run train_transformer.py to generate feature_scaler.pkl."
+                )
+            kind = "torch"
+
+        # ── commit point: everything above succeeded ──
+        self._kind = kind
+        self.model = model
+        self.clf = clf if kind == "sklearn" else None
+        self.scaler = scaler
+        self._sig = self._current_sig()
+
+    def reload_if_changed(self) -> bool:
+        """Reload model+scaler if the artifact files changed on disk.
+
+        Returns True if a reload happened. Never raises: on failure the
+        previously loaded weights keep serving and we resync the signature
+        so a half-written file doesn't cause a retry storm (the next
+        completed write changes mtime again and retries naturally).
+        """
+        try:
+            sig = self._current_sig()
+        except OSError:
+            return False
+        if sig == self._sig:
+            return False
+        print(f"🔁 Model artifact changed on disk — reloading {self.model_path}")
+        try:
+            self._load()
+            return True
+        except Exception as e:
+            print(f"❌ Hot-reload failed, keeping previous weights: {e}")
+            self._sig = sig
+            return False
 
     def predict(self, df: pd.DataFrame) -> float:
         """
@@ -165,7 +252,15 @@ class SafeMLPredictor:
         features (20-bar Z-scores etc.) for the window's early bars are
         computed with real prior history instead of a truncated, partial
         window -- see the note in data_feeds.get_clean_ohlcv_dataframe.
+
+        Side effects (intentional, step 0/5 plumbing):
+          * checks artifact mtimes and hot-reloads if they changed
+          * populates self.last_features[symbol] with the RAW last-row
+            feature vector used for that symbol's prediction
         """
+        self.reload_if_changed()
+        if self._kind == "sklearn":
+            return self._predict_batch_sklearn(df_dict)
         try:
             processed = {}
             tensors = []
@@ -174,33 +269,42 @@ class SafeMLPredictor:
             for symbol, df in df_dict.items():
                 df = df.copy()
                 df_features = add_features(df)
-                data = df_features[FEATURE_COLS].tail(self.seq_len).values.astype(np.float32)
-                
-                if len(data) < self.seq_len:
+                window = df_features[FEATURE_COLS].tail(self.seq_len)
+
+                if len(window) < self.seq_len:
                     processed[symbol] = 0.5
                     continue
-                
+
+                # Step 0: snapshot the RAW decision-time feature row (the
+                # last bar of the window the model is about to see) BEFORE
+                # any clipping/scaling, so captured vectors match
+                # training-space features exactly.
+                self.last_features[symbol] = {
+                    col: float(window.iloc[-1][col]) for col in FEATURE_COLS
+                }
+                data = window.values.astype(np.float32)
+
                 data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
                 data = np.clip(data, -1e6, 1e6)
-                
+
                 if self.scaler is not None:
                     data = self.scaler.transform(data).astype(np.float32)
                     data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
-                
+
                 x = torch.tensor(data).unsqueeze(0)
                 tensors.append(x)
                 symbols_in_order.append(symbol)
-            
+
             if not tensors:
                 return {s: 0.5 for s in df_dict.keys()}
-            
+
             # Stack all tensors for batched inference: (batch_size, seq_len, n_features)
             batch = torch.cat(tensors, dim=0).to(self.device)
-            
+
             with torch.no_grad():
                 raw_logits = self.model(batch)  # (batch_size, 1)
                 preds = torch.sigmoid(raw_logits).squeeze(-1)  # (batch_size,)
-            
+
             result = {}
             for symbol in df_dict.keys():
                 if symbol in symbols_in_order:
@@ -208,9 +312,34 @@ class SafeMLPredictor:
                     result[symbol] = float(preds[idx].item())
                 else:
                     result[symbol] = processed.get(symbol, 0.5)
-            
+
             return result
-            
+
         except Exception as e:
             print(f"Batch prediction error: {e}")
             return {symbol: 0.5 for symbol in df_dict.keys()}
+
+    def _predict_batch_sklearn(self, df_dict: dict) -> dict:
+        """Champion path for sklearn artifacts (e.g. a promoted GBT baseline).
+
+        Applies the SAME feature engineering; uses only the last feature row
+        (gradient-boosted trees are not sequence models). Populates
+        self.last_features exactly like the torch path.
+        """
+        result = {}
+        for symbol, df in df_dict.items():
+            try:
+                feats = add_features(df.copy())
+                if len(feats) == 0:
+                    result[symbol] = 0.5
+                    continue
+                last = feats[FEATURE_COLS].iloc[-1]
+                self.last_features[symbol] = {c: float(last[c]) for c in FEATURE_COLS}
+                row = feats[FEATURE_COLS].iloc[-1:].values.astype(np.float64)
+                proba = self.clf.predict_proba(row)[0]
+                classes = list(getattr(self.clf, "classes_", [0, 1]))
+                result[symbol] = float(proba[classes.index(1)]) if 1 in classes else float(proba[-1])
+            except Exception as e:
+                print(f"Sklearn champion predict error for {symbol}: {e}")
+                result[symbol] = 0.5
+        return result
