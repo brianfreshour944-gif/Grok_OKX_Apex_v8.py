@@ -91,6 +91,21 @@ MAX_TRAILING_STOP_PCT        = 0.03   # 3% ceiling
 SEQUENCE_LEN = 32
 MODEL_PATH   = "grok_gqa_v9_best.pth"
 
+# ── Experience capture & model bake-off pipeline ───────────────────────────────
+# Step 0: decision-time feature vectors + outcomes (JSONL, append-only).
+EXPERIENCE_LOG_PATH = os.getenv("EXPERIENCE_LOG_PATH", "live_experiences.jsonl")
+# Step 3: per-cycle challenger-vs-champion shadow predictions.
+SHADOW_LOG_PATH     = os.getenv("SHADOW_LOG_PATH", "shadow_predictions.jsonl")
+# Steps 2/4: GBT challenger artifact produced by train_gbt_baseline.py;
+# evaluated by promotion_gate.py. The live champion is still MODEL_PATH --
+# a challenger only becomes champion via an explicit MODEL_PATH change,
+# which SafeMLPredictor's hot-reload picks up without a restart.
+GBT_CHALLENGER_PATH = os.getenv("GBT_CHALLENGER_PATH", "gbt_challenger.joblib")
+# Label horizon shared by trainer/gate: 6 x 15-min bars = 90 min, matching
+# train_transformer.TARGET_HORIZON so champion and challenger are compared
+# on identical targets.
+GBT_HORIZON_BARS    = int(os.getenv("GBT_HORIZON_BARS", "6"))
+
 # ── Regime-adaptive thresholds ─────────────────────────────────────────────────
 # NOTE: buy/sell signals are anchored to BUY_SIGNAL / SELL_SIGNAL so that
 # lowering BUY_SIGNAL (e.g. 0.62 -> 0.51 for diagnostics) takes effect in
