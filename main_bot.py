@@ -357,7 +357,8 @@ async def run_trading_mode():
                         logger.info(f"⏳ {exit_reason} — {symbol} sell already pending, skipping duplicate submission")
                     elif exit_reason:
                         logger.info(f"{exit_reason} — SELL {symbol} @ {fmt_price(price)} | Regime: {regime}")
-                        success = await place_order(symbol, OrderSide.SELL, qty_held, price, avg_entry=avg_entry)
+                        _oid = {}
+                        success = await place_order(symbol, OrderSide.SELL, qty_held, price, avg_entry=avg_entry, order_id_out=_oid)
                         if success:
                             task = asyncio.create_task(send_discord_alert(
                                 title=f"🔴 SELL {symbol}",
@@ -383,6 +384,7 @@ async def run_trading_mode():
                                 regime=regime,
                                 held_hours=float(held_hours),
                                 pnl_pct=float(pnl_pct),
+                                order_id=_oid.get("order_id"),
                             )
                             # We deliberately DO NOT pop entry_time or highest_prices here.
                             # If the order fails or gets canceled, we want to retain the hold-time and peak price.
@@ -498,7 +500,8 @@ async def run_trading_mode():
                         f"🟢 BUY {symbol} @ {fmt_price(price)} | Regime: {regime} | "
                         f"Signal: {signal:.3f} | Positions: {open_count}/{MAX_OPEN_POSITIONS}"
                     )
-                    success = await place_order(symbol, OrderSide.BUY, qty, price)
+                    _oid = {}
+                    success = await place_order(symbol, OrderSide.BUY, qty, price, order_id_out=_oid)
                     if success:
                         task = asyncio.create_task(send_discord_alert(
                             title=f"🟢 BUY {symbol}",
@@ -528,6 +531,7 @@ async def run_trading_mode():
                             qty=float(qty),
                             trade_value=float(trade_value),
                             features=predictor.last_features.get(symbol),
+                            order_id=_oid.get("order_id"),
                         )
                         if open_count >= MAX_OPEN_POSITIONS:
                             logger.info("🔒 Max positions reached — no more buys this cycle.")
