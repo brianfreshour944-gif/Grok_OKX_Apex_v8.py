@@ -556,6 +556,17 @@ async def run_trading_mode():
                 if cooldown_until[sym] < cutoff:
                     cooldown_until.pop(sym, None)
 
+            # Prune per-symbol tracking state for symbols that are neither
+            # held nor in the active entry universe, so latest_signals /
+            # entry_time / highest_prices don't grow without bound as the
+            # dynamic universe rotates (and save_bot_state doesn't keep
+            # rewriting dead rows every cycle).
+            keep_symbols = symbols_to_process
+            for state in (latest_signals, entry_time, highest_prices):
+                for sym in list(state.keys()):
+                    if sym not in keep_symbols:
+                        state.pop(sym, None)
+
             # ── --once test flag: exit after first full cycle ──────────────────
             if "--once" in sys.argv:
                 logger.info("🏁 --once flag passed. Cycle complete. Exiting.")
