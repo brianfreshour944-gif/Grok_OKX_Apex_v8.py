@@ -33,7 +33,7 @@ def _sanitize_price(price: float) -> float:
 
 
 async def place_order(symbol: str, side: OrderSide, qty: float, price: float = None,
-                       avg_entry: float = None) -> bool:
+                       avg_entry: float = None, order_id_out: dict = None) -> bool:
     """
     Submits an order to Alpaca and logs it to the database.
     BUYs are Limit Orders (0.1% above market to ensure fill).
@@ -50,6 +50,10 @@ async def place_order(symbol: str, side: OrderSide, qty: float, price: float = N
     used to compute and persist realized PnL (net of fees) for that closed
     position. Ignored for BUY orders; if omitted on a SELL, realized PnL is
     simply not recorded for that trade (rather than guessed).
+
+    order_id_out: optional dict; on successful submission the exchange order
+    id is written to order_id_out["order_id"] so callers can associate
+    downstream logging (e.g. experience capture) with the real order.
     """
     try:
         if side == OrderSide.SELL:
@@ -79,6 +83,8 @@ async def place_order(symbol: str, side: OrderSide, qty: float, price: float = N
             trading_client.submit_order, order_data=order_data,
             max_retries=5, base_delay=1.0
         )
+        if order_id_out is not None:
+            order_id_out["order_id"] = str(getattr(order, "id", None))
         
         # Fetch actual fill details from exchange for accurate fee/slippage tracking
         actual_fill_price = None
