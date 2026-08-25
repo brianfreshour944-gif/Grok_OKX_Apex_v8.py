@@ -296,7 +296,8 @@ async def run_trading_mode():
                     _shadow = get_shadow_gbt()
                     if _shadow.available():
                         _feat_row = predictor.last_features.get(symbol)
-                        _gbt_prob = _shadow.predict_row(_feat_row)
+                        if _feat_row:
+                            _gbt_prob = _shadow.predict_row(_feat_row)
                         log_shadow_prediction(
                             symbol,
                             gbt_prob=_gbt_prob,
