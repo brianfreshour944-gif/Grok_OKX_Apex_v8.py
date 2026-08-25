@@ -421,7 +421,16 @@ async def run_trading_mode():
                             return getattr(q, 's', None) or getattr(q, 'size', 0) or 0
                         total_bid_size = sum(_quote_size(b) for b in book.bids)
                         total_ask_size = sum(_quote_size(a) for a in book.asks)
-                        imbalance = total_bid_size / total_ask_size if total_ask_size > 0 else 1.0
+                        # A fully one-sided book (either side empty) is itself
+                        # an extreme-condition signal: treat it as a veto
+                        # rather than defaulting to imbalance=1.0.
+                        if total_bid_size <= 0 or total_ask_size <= 0:
+                            logger.info(f"🚫 BUY skipped {symbol}: One-sided orderbook "
+                                        f"(bids={total_bid_size}, asks={total_ask_size})")
+                            _whale_veto = True
+                            imbalance = 0.0
+                        else:
+                            imbalance = total_bid_size / total_ask_size
                         
                         if imbalance < 0.65:
                             logger.info(f"🚫 BUY skipped {symbol}: Extreme selling pressure ({imbalance:.2f})")
