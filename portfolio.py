@@ -6,7 +6,7 @@ import time
 from alpaca.trading.enums import OrderSide
 
 from config import (
-    logger, trading_client, HEARTBEAT_PATH
+    logger, trading_client, HEARTBEAT_PATH, MAX_HOLD_HOURS
 )
 from orders import place_order
 
@@ -199,8 +199,16 @@ def sync_existing_positions(entry_time: dict, highest_prices: dict) -> None:
     for alpaca_sym, data in positions.items():
         sym = denormalize_symbol(alpaca_sym)
         if sym not in entry_time:
-            entry_time[sym] = time.time()
-            logger.info(f"   Seeded entry_time for {sym} (was missing after restart)")
+            # Crash-recovery: do NOT seed entry_time at "now". A position held
+            # 3.5h pre-crash would otherwise get a fresh hold clock, re-arming
+            # the time-decay stop-loss (which halves the stop after 2h held)
+            # and delaying max-hold. When the true open time is unknown
+            # (bot_state row lost / DB down), assume mid-life: half of
+            # MAX_HOLD_HOURS elapsed. This biases toward the tighter, more
+            # conservative stop rather than the widest one.
+            entry_time[sym] = time.time() - (MAX_HOLD_HOURS * 3600 * 0.5)
+            logger.info(f"   Seeded entry_time for {sym} (was missing after restart; "
+                        f"assumed {MAX_HOLD_HOURS/2:.1f}h held)")
         if sym not in highest_prices:
             # Seed highest_prices from current exchange price so the trailing
             # stop baseline reflects the actual market price at restart,
@@ -328,6 +336,48 @@ def cancel_stale_orders(timeout_minutes=3):
 async def cancel_stale_orders_async(timeout_minutes=3):
     """Async wrapper for cancel_stale_orders to avoid blocking the event loop."""
     await asyncio.to_thread(cancel_stale_orders, timeout_minutes)
+
+
+def fetch_open_sell_symbols() -> set:
+    """
+    Returns the set of Alpaca-format symbols ('BTCUSD') that currently have an
+    OPEN SELL order on the exchange. Used at startup so that, after a crash,
+    every held position with a live sell gets a pending-exit guard — the
+    in-memory pending_exit_until dict does not survive a restart, and without
+    this the bot would submit a duplicate full-size SELL on its first cycle.
+    """
+    try:
+        from alpaca.trading.requests import GetOrdersRequest
+        from alpaca.trading.enums import QueryOrderStatus, OrderSide as _OS
+        req = GetOrdersRequest(status=QueryOrderStatus.OPEN)
+        return {
+            o.symbol for o in trading_client.get_orders(req)
+            if o.side == _OS.SELL
+        }
+    except Exception as e:
+        logger.warning(f"fetch_open_sell_symbols failed (non-fatal): {e}")
+        return set()
+
+
+def fetch_recent_closed_orders(hours: float = 24.0) -> list:
+    """
+    Returns closed orders submitted within the last `hours` hours. Used by the
+    startup trade-log reconciliation: a crash between submit_order() success
+    and the DB write loses that trade row permanently unless it is back-filled
+    from exchange order history.
+    """
+    try:
+        from alpaca.trading.requests import GetOrdersRequest
+        from alpaca.trading.enums import QueryOrderStatus
+        from datetime import datetime, timedelta, timezone
+        req = GetOrdersRequest(
+            status=QueryOrderStatus.CLOSED,
+            after=datetime.now(timezone.utc) - timedelta(hours=hours),
+        )
+        return list(trading_client.get_orders(req))
+    except Exception as e:
+        logger.warning(f"fetch_recent_closed_orders failed (non-fatal): {e}")
+        return []
 
 def calculate_kelly_multiplier(signal_prob: float, profit_target_pct: float, stop_loss_pct: float) -> float:
     """

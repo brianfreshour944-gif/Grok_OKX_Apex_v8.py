@@ -4,7 +4,7 @@
 
 import os
 import psycopg2
-from config import logger
+from config import logger, BOT_NAME
 
 
 def _init_bot_status_table(cur):
@@ -211,6 +211,52 @@ def record_trade(bot_name, symbol, side, qty, price, order_id=None, fee=0.0, fil
             logger.info(f"Recorded trade: {side} {symbol} | Qty: {qty:.6f} | Price: {price} | Fill: {actual_fill_price} | Fee: ${float(fee):.4f}{pnl_str}")
     except Exception as e:
         logger.error(f"DB Error: {e}")
+
+
+def backfill_trade_if_missing(order) -> bool:
+    """
+    Crash-recovery reconciliation: if an exchange order has no row in the
+    trades table (the process died between submit_order() success and the
+    record_trade() write), insert one from the exchange's own order data.
+    Returns True if a row was inserted, False otherwise. Never raises.
+    """
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url:
+        return False
+    order_id = str(getattr(order, "id", "") or "")
+    if not order_id:
+        return False
+    try:
+        with psycopg2.connect(db_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM trades WHERE order_id = %s LIMIT 1",
+                            (order_id,))
+                if cur.fetchone() is not None:
+                    return False  # already recorded — nothing to back-fill
+
+                qty = float(getattr(order, "filled_qty", None)
+                            or getattr(order, "qty", 0) or 0)
+                fill_price = getattr(order, "filled_avg_price", None)
+                fill_price = float(fill_price) if fill_price else None
+                fee = float(getattr(order, "commission", None) or 0.0)
+                side = str(getattr(order, "side", "") or "")
+                symbol = str(getattr(order, "symbol", "") or "")
+                created = getattr(order, "created_at", None)
+                value = (fill_price or 0.0) * qty
+                cur.execute("""
+                    INSERT INTO trades
+                        (bot_name, exchange, symbol, side, price, quantity,
+                         value, fee, fill_price, order_id, timestamp)
+                    VALUES (%s, 'Alpaca', %s, %s, %s, %s, %s, %s, %s, %s, COALESCE(%s, NOW()))
+                """, (bot_name, symbol, side, fill_price or 0.0, qty, value,
+                      fee, fill_price, order_id, created))
+            conn.commit()
+        logger.info(f"🔁 Back-filled missing trade row from exchange order {order_id} "
+                    f"({side} {symbol} qty={qty})")
+        return True
+    except Exception as e:
+        logger.error(f"backfill_trade_if_missing failed for order {order_id}: {e}")
+        return False
 
 
 def get_realized_pnl_summary(bot_name):

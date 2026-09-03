@@ -25,7 +25,7 @@ from config import (
     DYNAMIC_UNIVERSE_CANDIDATES, UNIVERSE_SIZE, UNIVERSE_REFRESH_SECONDS,
     get_regime_params, fmt_price, trading_client,
 )
-from database import report_equity, init_db, save_bot_state, load_bot_state
+from database import report_equity, init_db, save_bot_state, load_bot_state, backfill_trade_if_missing
 from data_feeds import get_clean_ohlcv_dataframe, get_orderbook_with_retry, scan_stable_assets
 from regime import compute_regime_and_trend, calculate_adjusted_risk
 from portfolio import (
@@ -33,6 +33,7 @@ from portfolio import (
     sync_existing_positions, normalize_symbol, denormalize_symbol,
     swap_weakest_position, sell_largest_position, cancel_stale_orders_async, write_heartbeat,
     calculate_kelly_multiplier, has_pending_exit, mark_pending_exit,
+    fetch_open_sell_symbols, fetch_recent_closed_orders,
 )
 from orders import place_order
 from exit_logic import evaluate_exit
@@ -66,15 +67,44 @@ async def run_trading_mode():
     await asyncio.to_thread(init_db)  # create DB tables once at startup (no-op if DATABASE_URL not set)
     cooldown_until, entry_time, latest_signals, highest_prices = await asyncio.to_thread(load_bot_state)
     sync_existing_positions(entry_time, highest_prices)
-    
-    # ── Startup: cancel any stale unfilled orders left over from a crash ──────────
-    # If the bot placed a limit order then crashed before recording the fill,
-    # those orders are still open on the exchange. This prevents them from
-    # locking buying power or causing duplicate fills on restart.
+
+    # ── Startup: cancel ANY unfilled orders left over from a crash ────────────────
+    # timeout_minutes=0 cancels every open order, not just >3-min ones. The bot
+    # keeps no order bookkeeping, so nothing in-flight is worth preserving: an
+    # unfilled BUY younger than 3 min combined with the (position-less) state
+    # after restart would otherwise cause a DUPLICATE BUY if it later filled.
     try:
-        await cancel_stale_orders_async(timeout_minutes=3)
+        await cancel_stale_orders_async(timeout_minutes=0)
     except Exception as e:
         logger.warning(f"⚠️  Startup cancel_stale_orders failed (non-fatal): {e}")
+
+    # ── Startup: re-arm the pending-exit guard for held positions ─────────────────
+    # pending_exit_until is in-memory only and does not survive a restart. Any
+    # held position with a live SELL order on the exchange must get a fresh
+    # guard, or the first cycle would submit a duplicate full-size SELL.
+    try:
+        open_sell_syms = await asyncio.to_thread(fetch_open_sell_symbols)
+        for alpaca_sym in open_sell_syms:
+            sym = denormalize_symbol(alpaca_sym)
+            mark_pending_exit(sym)
+            logger.info(f"🛡️ Re-armed pending-exit guard for {sym} (open SELL order survived restart)")
+    except Exception as e:
+        logger.warning(f"⚠️ Startup pending-exit re-arm failed (non-fatal): {e}")
+
+    # ── Startup: back-fill trade rows lost to a crash mid-order ───────────────────
+    # If the process died between submit_order() success and the record_trade()
+    # write, that trade has no row in the trades table. Reconcile against the
+    # exchange's closed-order history for the last 24h.
+    try:
+        recent = await asyncio.to_thread(fetch_recent_closed_orders, 24.0)
+        backfilled = 0
+        for o in recent:
+            if await asyncio.to_thread(backfill_trade_if_missing, o):
+                backfilled += 1
+        if backfilled:
+            logger.info(f"🔁 Trade-log reconciliation: back-filled {backfilled} order(s) from exchange history")
+    except Exception as e:
+        logger.warning(f"⚠️ Startup trade-log reconciliation failed (non-fatal): {e}")
     
     logger.info("🚀 Grok Apex Ironclad Bot v9 - Cutting Edge Started")
 
@@ -561,7 +591,14 @@ async def run_trading_mode():
             # entry_time / highest_prices don't grow without bound as the
             # dynamic universe rotates (and save_bot_state doesn't keep
             # rewriting dead rows every cycle).
-            keep_symbols = symbols_to_process
+            # CRITICAL: never prune state for symbols we HOLD. A held position
+            # that rotates out of this cycle's universe still needs its
+            # entry_time (time-decay stop) and highest_prices (trailing-stop
+            # peak) intact when it rotates back in — deleting them re-arms the
+            # trailing stop from the current price and resets the hold clock.
+            keep_symbols = set(symbols_to_process) | {
+                denormalize_symbol(s) for s in current_positions.keys()
+            }
             for state in (latest_signals, entry_time, highest_prices):
                 for sym in list(state.keys()):
                     if sym not in keep_symbols:
