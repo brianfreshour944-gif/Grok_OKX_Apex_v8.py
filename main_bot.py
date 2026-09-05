@@ -43,12 +43,39 @@ from money import mul, div, qty as money_qty
 from experience_capture import log_entry_experience, log_exit_outcome, log_shadow_prediction
 from shadow_model import get_shadow_gbt
 
-# --- Global state ---
-cooldown_until: dict = {}
-entry_time:     dict = {}
-latest_signals: dict = {}
-highest_prices: dict = {}
-start_equity         = None
+# --- Trading Bot State Class ---
+class TradingBotState:
+    """Encapsulates all per-bot-instance state to avoid module-level globals."""
+    
+    def __init__(self):
+        self.cooldown_until: dict = {}
+        self.entry_time: dict = {}
+        self.latest_signals: dict = {}
+        self.highest_prices: dict = {}
+        self.start_equity: float | None = None
+        self.last_universe_scan: float = 0.0
+        self.active_universe: list = []
+
+    def load_from_db(self):
+        """Load state from database."""
+        self.cooldown_until, self.entry_time, self.latest_signals, self.highest_prices = load_bot_state()
+    
+    def save_to_db(self):
+        """Save state to database."""
+        save_bot_state(self.cooldown_until, self.entry_time, self.latest_signals, self.highest_prices)
+    
+    def prune_stale_cooldowns(self, cutoff: float):
+        """Remove cooldown entries older than cutoff."""
+        for sym in list(self.cooldown_until.keys()):
+            if self.cooldown_until[sym] < cutoff:
+                self.cooldown_until.pop(sym, None)
+    
+    def prune_tracking_state(self, keep_symbols: set):
+        """Prune tracking state for symbols no longer relevant."""
+        for state_dict in (self.latest_signals, self.entry_time, self.highest_prices):
+            for sym in list(state_dict.keys()):
+                if sym not in keep_symbols:
+                    state_dict.pop(sym, None)
 
 
 # NOTE: previously this file had its own duplicate SafeMLPredictor class,
@@ -59,14 +86,13 @@ start_equity         = None
 predictor = SafeMLPredictor(model_path=MODEL_PATH, seq_len=SEQUENCE_LEN)
 
 
-
-# ── Main trading loop ──────────────────────────────────────────────────────────
+# ── Main trading loop ───────────────────────────────────────────────
 async def run_trading_mode():
-    global start_equity, cooldown_until, entry_time, latest_signals, highest_prices
+    state = TradingBotState()
 
     await asyncio.to_thread(init_db)  # create DB tables once at startup (no-op if DATABASE_URL not set)
-    cooldown_until, entry_time, latest_signals, highest_prices = await asyncio.to_thread(load_bot_state)
-    sync_existing_positions(entry_time, highest_prices)
+    state.load_from_db()
+    sync_existing_positions(state.entry_time, state.highest_prices)
 
     # ── Startup: cancel ANY unfilled orders left over from a crash ────────────────
     # timeout_minutes=0 cancels every open order, not just >3-min ones. The bot
@@ -141,7 +167,7 @@ async def run_trading_mode():
                 account = await asyncio.to_thread(trading_client.get_account)
                 initial_equity = float(account.equity)
                 if initial_equity > 0:
-                    start_equity = initial_equity
+                    state.start_equity = initial_equity
                 else:
                     logger.warning(f"⚠️ Initial equity from broker is <=0 (${initial_equity:.2f}), using last known start_equity from state")
             except Exception as e:
@@ -161,17 +187,17 @@ async def run_trading_mode():
                             live_equity              = EXCLUDED.live_equity,
                             live_equity_updated_at   = NOW(),
                             last_update              = NOW()
-                    """, (BOT_NAME, float(start_equity or 0), float(start_equity or 0)))
+                    """, (BOT_NAME, float(state.start_equity or 0), float(state.start_equity or 0)))
                     conn.commit()
-                    logger.info(f"✅ Synced starting_equity to ${start_equity or 0:.2f} in database")
+                    logger.info(f"✅ Synced starting_equity to ${state.start_equity or 0:.2f} in database")
         except Exception as e:
             logger.warning(f"⚠️ Could not sync starting_equity: {e}")
 
-    # Dynamic universe state. last_universe_scan starts at 0.0 so the very
+    # Dynamic universe state. state.last_universe_scan starts at 0.0 so the very
     # first cycle always scans immediately rather than waiting a full
     # UNIVERSE_REFRESH_SECONDS with an empty universe.
-    active_universe    = []
-    last_universe_scan = 0.0
+    state.active_universe    = []
+    state.last_universe_scan = 0.0
 
     while True:
         try:
@@ -182,26 +208,26 @@ async def run_trading_mode():
             equity       = float(account.equity)
             # Guard: never pin start_equity to 0.0. If equity is ever
             # reported as 0 (bad API response, zero-balance account, etc.)
-            # a naive `if start_equity is None: start_equity = equity` would
+            # a naive `if state.start_equity is None: state.start_equity = equity` would
             # permanently lock start_equity at 0.0, causing
             # (equity - start_equity) / start_equity to raise
             # ZeroDivisionError EVERY cycle forever — an unrecoverable
             # crash-loop that looks like a transient error in the logs.
             # Instead, skip the drawdown check entirely on cycles where we
             # don't yet have a valid (>0) baseline equity to compare against.
-            if start_equity is None and equity > 0:
-                start_equity = equity
+            if state.start_equity is None and equity > 0:
+                state.start_equity = equity
 
             await asyncio.to_thread(report_equity, BOT_NAME, equity)
 
             drawdown = None
-            if not start_equity:
+            if not state.start_equity:
                 logger.warning(
                     f"⚠️ No valid starting equity yet (equity=${equity:.2f}) — "
                     f"skipping drawdown check this cycle."
                 )
             else:
-                drawdown = (equity - start_equity) / start_equity * 100
+                drawdown = (equity - state.start_equity) / state.start_equity * 100
                 if drawdown < MAX_DRAWDOWN_STOP:
                     logger.error("🚨 MAX DRAWDOWN HIT - Stopping trading")
                     break
@@ -246,18 +272,18 @@ async def run_trading_mode():
 
             now = time.time()
 
-            if now - last_universe_scan >= UNIVERSE_REFRESH_SECONDS:
+            if now - state.last_universe_scan >= UNIVERSE_REFRESH_SECONDS:
                 try:
-                    active_universe = await scan_stable_assets(
+                    state.active_universe = await scan_stable_assets(
                         limit_scope=UNIVERSE_SIZE, candidates=DYNAMIC_UNIVERSE_CANDIDATES
                     )
-                    last_universe_scan = now
+                    state.last_universe_scan = now
                     logger.info(
-                        f"🔍 Universe refreshed ({len(active_universe)} of "
-                        f"{len(DYNAMIC_UNIVERSE_CANDIDATES)} candidates by 24h volume): {active_universe}"
+                        f"🔍 Universe refreshed ({len(state.active_universe)} of "
+                        f"{len(DYNAMIC_UNIVERSE_CANDIDATES)} candidates by 24h volume): {state.active_universe}"
                     )
                 except Exception as e:
-                    logger.warning(f"⚠️ Universe scan failed, keeping previous universe {active_universe}: {e}")
+                    logger.warning(f"⚠️ Universe scan failed, keeping previous universe {state.active_universe}: {e}")
 
             # Any symbol we currently hold must stay under exit management even
             # if it has since rotated out of the active entry universe --
@@ -268,7 +294,7 @@ async def run_trading_mode():
                 for alpaca_sym, p in current_positions.items()
                 if p["market_value"] >= MIN_POSITION_USD
             }
-            symbols_to_process = list(dict.fromkeys(active_universe + list(held_symbols)))
+            symbols_to_process = list(dict.fromkeys(state.active_universe + list(held_symbols)))
 
             # PARALLEL FETCH: Fetch all OHLCV dataframes concurrently
             fetch_tasks = [get_clean_ohlcv_dataframe(sym) for sym in symbols_to_process]
@@ -305,7 +331,7 @@ async def run_trading_mode():
                 position_size_multiplier = 1.0  # regime_flag removed (was Windows-only path)
 
                 signal = signals.get(symbol, 0.5)
-                latest_signals[symbol] = signal
+                state.state.state.latest_signals[symbol] = signal
                 # FORCE LOG AT INFO LEVEL - this will appear 100%
                 logger.info(
                     f"🔬 TEST | Asset: {symbol} | ML Signal: {signal:.4f} | "
@@ -351,12 +377,12 @@ async def run_trading_mode():
 
                 # ── EXIT ───────────────────────────────────────────────────────
                 if has_position:
-                    held_hours = (now - entry_time.get(symbol, now)) / 3600
+                    held_hours = (now - state.entry_time.get(symbol, now)) / 3600
 
                     decision = evaluate_exit(
                         avg_entry=avg_entry,
                         price=price,
-                        highest_seen=highest_prices.get(symbol, avg_entry),
+                        highest_seen=state.highest_prices.get(symbol, avg_entry),
                         held_hours=held_hours,
                         signal=signal,
                         regime=regime,
@@ -372,7 +398,7 @@ async def run_trading_mode():
                     )
                     pnl_pct              = decision.pnl_pct
                     highest_seen         = decision.highest_seen
-                    highest_prices[symbol] = highest_seen
+                    state.highest_prices[symbol] = highest_seen
                     exit_reason          = decision.exit_reason
 
                     if exit_reason and has_pending_exit(symbol):
@@ -399,7 +425,7 @@ async def run_trading_mode():
                                 logger.error(f"Discord alert failed: {t.exception()}")
                                 if not t.cancelled() and t.exception() else None
                             ))
-                            cooldown_until[symbol] = now + COOLDOWN_SECONDS_SELL
+                            state.state.cooldown_until[symbol] = now + COOLDOWN_SECONDS_SELL
                             mark_pending_exit(symbol)
                             # Step 0: record the realized outcome paired with
                             # this position's decision-time context. The
@@ -416,7 +442,7 @@ async def run_trading_mode():
                                 pnl_pct=float(pnl_pct),
                                 order_id=_oid.get("order_id"),
                             )
-                            # We deliberately DO NOT pop entry_time or highest_prices here.
+                            # We deliberately DO NOT pop state.entry_time or state.highest_prices here.
                             # If the order fails or gets canceled, we want to retain the hold-time and peak price.
                     else:
                         logger.info(
@@ -430,7 +456,7 @@ async def run_trading_mode():
 
                 # ── ENTRY ──────────────────────────────────────────────────────
                 # Skip entries if this symbol is on cooldown (e.g. recently sold/bought)
-                if now < cooldown_until.get(symbol, 0.0):
+                if now < state.state.cooldown_until.get(symbol, 0.0):
                     await asyncio.sleep(2)
                     continue
 
@@ -485,7 +511,7 @@ async def run_trading_mode():
 
 
                     if not buys_allowed:
-                        sold_notional = await swap_weakest_position(symbol, signal, latest_signals)
+                        sold_notional = await swap_weakest_position(symbol, signal, state.latest_signals)
                         if sold_notional > 0:
                             logger.info(f"✅ Swapped weak position to make room for {symbol}. Proceeding with buy.")
                             buys_allowed = True
@@ -551,9 +577,9 @@ async def run_trading_mode():
                             logger.error(f"Discord alert failed: {t.exception()}")
                             if not t.cancelled() and t.exception() else None
                         ))
-                        cooldown_until[symbol]   = now + COOLDOWN_SECONDS_BUY
-                        entry_time[symbol]        = now
-                        highest_prices[symbol]    = price
+                        state.state.cooldown_until[symbol]   = now + COOLDOWN_SECONDS_BUY
+                        state.state.entry_time[symbol]        = now
+                        state.state.highest_prices[symbol]    = price
                         running_portfolio_value  += trade_value
                         open_count               += 1
                         # Step 0: snapshot the EXACT feature vector + context
@@ -577,18 +603,18 @@ async def run_trading_mode():
                             buys_allowed = False
             
             # Save state at the end of each cycle
-            await asyncio.to_thread(save_bot_state, cooldown_until, entry_time, latest_signals, highest_prices)
+            await asyncio.to_thread(save_bot_state, state.cooldown_until, state.entry_time, state.latest_signals, state.highest_prices)
             
             # Periodic cleanup of stale cooldown entries (older than 1 hour)
             # to prevent unbounded memory growth from historical cooldown data
             cutoff = now - 3600  # 1 hour ago
-            for sym in list(cooldown_until.keys()):
-                if cooldown_until[sym] < cutoff:
-                    cooldown_until.pop(sym, None)
+            for sym in list(state.cooldown_until.keys()):
+                if state.cooldown_until[sym] < cutoff:
+                    state.cooldown_until.pop(sym, None)
 
             # Prune per-symbol tracking state for symbols that are neither
-            # held nor in the active entry universe, so latest_signals /
-            # entry_time / highest_prices don't grow without bound as the
+            # held nor in the active entry universe, so state.latest_signals /
+            # state.entry_time / state.highest_prices don't grow without bound as the
             # dynamic universe rotates (and save_bot_state doesn't keep
             # rewriting dead rows every cycle).
             # CRITICAL: never prune state for symbols we HOLD. A held position
@@ -599,10 +625,10 @@ async def run_trading_mode():
             keep_symbols = set(symbols_to_process) | {
                 denormalize_symbol(s) for s in current_positions.keys()
             }
-            for state in (latest_signals, entry_time, highest_prices):
-                for sym in list(state.keys()):
+            for state_dict in (state.latest_signals, state.entry_time, state.highest_prices):
+                for sym in list(state_dict.keys()):
                     if sym not in keep_symbols:
-                        state.pop(sym, None)
+                        state_dict.pop(sym, None)
 
             # ── --once test flag: exit after first full cycle ──────────────────
             if "--once" in sys.argv:

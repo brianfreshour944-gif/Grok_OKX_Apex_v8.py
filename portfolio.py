@@ -10,30 +10,38 @@ from config import (
 )
 from orders import place_order
 
-# Per-symbol sell retry cooldown: prevents spam when settlement is delayed.
-sell_retry_cooldown: dict = {}
 
-# Per-symbol "a sell was just submitted for this position, don't submit
-# another yet" guard, shared by every sell path (the main exit loop,
-# sell_largest_position, swap_weakest_position). Without this, a position
-# with a limit sell still unfilled keeps showing as fully held on every
-# subsequent cycle -- if the exit condition is still true (the common case;
-# prices rarely reverse within one ~40s loop iteration), the SAME exit
-# fires again and submits a duplicate full-size SELL, repeating every
-# cycle until cancel_stale_orders_async's 3-minute cleanup catches up.
-# Set to slightly longer than that 3-minute window so a genuinely stuck
-# order gets one fresh re-evaluation shortly after it's been cancelled,
-# rather than being blocked indefinitely.
-PENDING_EXIT_SECONDS = 240
-pending_exit_until: dict = {}
+# --- Portfolio State Class ---
+class PortfolioState:
+    """Encapsulates portfolio-related state to avoid module-level globals."""
+    
+    def __init__(self):
+        # Per-symbol sell retry cooldown: prevents spam when settlement is delayed.
+        self.sell_retry_cooldown: dict = {}
+        
+        # Per-symbol "a sell was just submitted for this position, don't submit
+        # another yet" guard, shared by every sell path (the main exit loop,
+        # sell_largest_position, swap_weakest_position).
+        self.PENDING_EXIT_SECONDS = 240
+        self.pending_exit_until: dict = {}
+
+    def has_pending_exit(self, symbol: str) -> bool:
+        return time.time() < self.pending_exit_until.get(symbol, 0.0)
+
+    def mark_pending_exit(self, symbol: str) -> None:
+        self.pending_exit_until[symbol] = time.time() + self.PENDING_EXIT_SECONDS
+
+
+# Global instance for backward compatibility
+_portfolio_state = PortfolioState()
 
 
 def has_pending_exit(symbol: str) -> bool:
-    return time.time() < pending_exit_until.get(symbol, 0.0)
+    return _portfolio_state.has_pending_exit(symbol)
 
 
 def mark_pending_exit(symbol: str) -> None:
-    pending_exit_until[symbol] = time.time() + PENDING_EXIT_SECONDS
+    _portfolio_state.mark_pending_exit(symbol)
 
 
 def normalize_symbol(symbol: str) -> str:
@@ -117,8 +125,8 @@ def _select_largest_position_to_sell() -> dict | None:
         symbol  = denormalize_symbol(largest.symbol)
         now     = time.time()
 
-        if symbol in sell_retry_cooldown:
-            elapsed = now - sell_retry_cooldown[symbol]
+        if symbol in _portfolio_state.sell_retry_cooldown:
+            elapsed = now - _portfolio_state.sell_retry_cooldown[symbol]
             if elapsed < 300:
                 logger.warning(
                     f"⏳ Sell retry cooldown for {symbol} "
@@ -166,10 +174,10 @@ async def sell_largest_position() -> None:
         avg_entry=candidate["avg_entry"],
     )
     if success:
-        sell_retry_cooldown.pop(candidate["symbol"], None)
+        _portfolio_state.sell_retry_cooldown.pop(candidate["symbol"], None)
         mark_pending_exit(candidate["symbol"])
     else:
-        sell_retry_cooldown[candidate["symbol"]] = time.time()
+        _portfolio_state.sell_retry_cooldown[candidate["symbol"]] = time.time()
 
 
 def sync_existing_positions(entry_time: dict, highest_prices: dict) -> None:
