@@ -111,6 +111,35 @@ def init_db():
         logger.warning(f"⚠️ DB init failed (non-fatal): {e}")
 
 
+def vacuum_full_if_needed():
+    """
+    Run VACUUM (ANALYZE) on tables that may have bloated from frequent
+    UPSERTs (bot_state) and high-volume inserts (trades, equity_history).
+
+    CRITICAL: PostgreSQL's VACUUM cannot run inside a transaction block.
+    psycopg2's default context manager 'with psycopg2.connect(...)' starts a
+    transaction, so calling VACUUM inside it raises:
+      'cannot execute VACUUM from within a transaction block'
+
+    Fix: set conn.autocommit = True so VACUUM runs as its own statement,
+    not wrapped in BEGIN/COMMIT.
+    """
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url:
+        return
+    try:
+        with psycopg2.connect(db_url) as conn:
+            conn.autocommit = True  # must be outside any transaction block
+            with conn.cursor() as cur:
+                cur.execute("VACUUM (ANALYZE) bot_state")
+                cur.execute("VACUUM (ANALYZE) trades")
+                cur.execute("VACUUM (ANALYZE) equity_history")
+                cur.execute("VACUUM (ANALYZE) bot_status")
+        logger.info("📘 DB: vacuum completed")
+    except Exception as e:
+        logger.warning(f"⚠️ DB vacuum failed (non-fatal): {e}")
+
+
 def save_bot_state(cooldown_until, entry_time, latest_signals, highest_prices):
     """
     Save the bot's state to the database.

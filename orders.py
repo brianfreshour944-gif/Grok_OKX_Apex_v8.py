@@ -86,19 +86,49 @@ async def place_order(symbol: str, side: OrderSide, qty: float, price: float = N
         if order_id_out is not None:
             order_id_out["order_id"] = str(getattr(order, "id", None))
         
-        # Fetch actual fill details from exchange for accurate fee/slippage tracking
+        # Fetch actual fill details from exchange for accurate fee/slippage tracking.
+        # CRITICAL FIX: Limit orders may not fill immediately. We must wait for
+        # the fill to actually happen before returning, otherwise the next
+        # trading cycle reads stale positions from the exchange (which still
+        # shows the position as open), causing position sizing based on stale
+        # data and "order not found" errors when trying to look up the order.
         actual_fill_price = None
         actual_fee = 0.0
         try:
-            # Try to get filled order details (order may fill immediately or pending)
-            filled_order = await call_with_rate_limit_handling_async(
-                trading_client.get_order_by_id, order.id,
-                max_retries=5, base_delay=1.0
-            )
-            if hasattr(filled_order, 'filled_avg_price') and filled_order.filled_avg_price:
-                actual_fill_price = float(filled_order.filled_avg_price)
-            if hasattr(filled_order, 'commission') and filled_order.commission:
-                actual_fee = float(filled_order.commission)
+            # Poll for fill status up to FILL_WAIT_TIMEOUT seconds
+            FILL_WAIT_TIMEOUT = 60  # seconds
+            FILL_POLL_INTERVAL = 2  # seconds between polls
+            elapsed = 0.0
+            filled_order = None
+
+            while elapsed < FILL_WAIT_TIMEOUT:
+                filled_order = await call_with_rate_limit_handling_async(
+                    trading_client.get_order_by_id, order.id,
+                    max_retries=3, base_delay=1.0
+                )
+                if filled_order is None:
+                    await asyncio.sleep(FILL_POLL_INTERVAL)
+                    elapsed += FILL_POLL_INTERVAL
+                    continue
+
+                # Check if the order has filled (filled_qty == qty means filled)
+                filled_qty = getattr(filled_order, 'filled_qty', None)
+                if filled_qty and float(filled_qty) > 0:
+                    if hasattr(filled_order, 'filled_avg_price') and filled_order.filled_avg_price:
+                        actual_fill_price = float(filled_order.filled_avg_price)
+                    if hasattr(filled_order, 'commission') and filled_order.commission:
+                        actual_fee = float(filled_order.commission)
+                    break
+
+                await asyncio.sleep(FILL_POLL_INTERVAL)
+                elapsed += FILL_POLL_INTERVAL
+
+            if filled_order is not None:
+                if actual_fill_price is None and hasattr(filled_order, 'filled_avg_price') and filled_order.filled_avg_price:
+                    actual_fill_price = float(filled_order.filled_avg_price)
+                if actual_fee == 0.0 and hasattr(filled_order, 'commission') and filled_order.commission:
+                    actual_fee = float(filled_order.commission)
+
         except Exception as fill_err:
             logger.warning(f"Could not fetch fill details for order {order.id}: {fill_err}")
         

@@ -63,6 +63,7 @@ ACCOUNT_BASE         = float(os.getenv("ACCOUNT_BASE", 10000))
 BASE_RISK_PERCENT    = 0.02     # 2% of equity per position
 MAX_SINGLE_TRADE_USD = float(os.getenv("MAX_SINGLE_TRADE_USD", 5000))  # absolute backstop
 MAX_DRAWDOWN_STOP    = -10.0    # % drawdown at which trading halts
+DAILY_LOSS_LIMIT     = -3.0     # % of starting equity lost in a session before hard halt
 
 # ── Position management ────────────────────────────────────────────────────────
 MAX_OPEN_POSITIONS           = 10

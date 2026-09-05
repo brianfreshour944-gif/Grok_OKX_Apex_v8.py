@@ -17,7 +17,7 @@ from alpaca.trading.enums import OrderSide
 
 from config import (
     logger, BOT_NAME, SEQUENCE_LEN, MODEL_PATH,
-    MAX_OPEN_POSITIONS, MAX_DRAWDOWN_STOP, MAX_HOLD_HOURS,
+    MAX_OPEN_POSITIONS, MAX_DRAWDOWN_STOP, DAILY_LOSS_LIMIT, MAX_HOLD_HOURS,
     BASE_RISK_PERCENT, MIN_POSITION_USD, MIN_ORDER_USD, MAX_SINGLE_TRADE_USD,
     MIN_HOLD_HOURS_BEFORE_SIGNAL,
     COOLDOWN_SECONDS_BUY, COOLDOWN_SECONDS_SELL, SLEEP_PER_LOOP,
@@ -25,7 +25,7 @@ from config import (
     DYNAMIC_UNIVERSE_CANDIDATES, UNIVERSE_SIZE, UNIVERSE_REFRESH_SECONDS,
     get_regime_params, fmt_price, trading_client,
 )
-from database import report_equity, init_db, save_bot_state, load_bot_state, backfill_trade_if_missing
+from database import report_equity, init_db, save_bot_state, load_bot_state, backfill_trade_if_missing, vacuum_full_if_needed
 from data_feeds import get_clean_ohlcv_dataframe, get_orderbook_with_retry, scan_stable_assets
 from regime import compute_regime_and_trend, calculate_adjusted_risk
 from portfolio import (
@@ -42,6 +42,72 @@ from ml_predictor import SafeMLPredictor
 from money import mul, div, qty as money_qty
 from experience_capture import log_entry_experience, log_exit_outcome, log_shadow_prediction
 from shadow_model import get_shadow_gbt
+
+
+# ── CircuitBreaker ───────────────────────────────────────────────────────
+class CircuitBreaker:
+    """
+    Simple failure-count circuit breaker for exchange API calls.
+
+    When the exchange API returns repeated errors we assume the exchange is
+    experiencing an outage. In that state:
+
+    - NEW ENTRY orders (BUY) are BLOCKED — we don't want to open positions
+      during an outage when fills may be unreliable.
+    - EXIT orders (SELL/close) are ALLOWED — we need to close existing
+      positions to de-risk when the market is moving fast.
+    """
+
+    def __init__(
+        self,
+        name: str = "exchange",
+        failure_threshold: int = 5,
+        window_seconds: float = 300,
+        reset_timeout_seconds: float = 600,
+    ):
+        self.name = name
+        self.failure_threshold = failure_threshold
+        self.window_seconds = window_seconds
+        self.reset_timeout_seconds = reset_timeout_seconds
+        self._failure_timestamps: list[float] = []
+        self._tripped_at: float | None = None
+
+    def record_failure(self):
+        now = time.time()
+        self._failure_timestamps.append(now)
+        cutoff = now - self.window_seconds
+        self._failure_timestamps = [t for t in self._failure_timestamps if t > cutoff]
+        if len(self._failure_timestamps) >= self.failure_threshold:
+            self._tripped_at = now
+            logger.critical(
+                f"Circuit breaker TRIPPED for {self.name} "
+                f"({len(self._failure_timestamps)} failures in {self.window_seconds}s). "
+                f"Blocking new entries."
+            )
+
+    def is_tripped(self) -> bool:
+        if self._tripped_at is None:
+            return False
+        if time.time() - self._tripped_at >= self.reset_timeout_seconds:
+            logger.warning(
+                f"Circuit breaker for {self.name} auto-resetting after "
+                f"{self.reset_timeout_seconds}s cooldown."
+            )
+            self._failure_timestamps.clear()
+            self._tripped_at = None
+            return False
+        return True
+
+    def record_success(self):
+        self._failure_timestamps.clear()
+
+    @property
+    def state(self) -> str:
+        return "OPEN" if self._tripped_at is not None else "CLOSED"
+
+
+# Global circuit breaker instance
+circuit_breaker = CircuitBreaker()
 
 # --- Trading Bot State Class ---
 class TradingBotState:
@@ -91,6 +157,7 @@ async def run_trading_mode():
     state = TradingBotState()
 
     await asyncio.to_thread(init_db)  # create DB tables once at startup (no-op if DATABASE_URL not set)
+    await asyncio.to_thread(vacuum_full_if_needed)  # safe VACUUM (uses autocommit mode)
     state.load_from_db()
     sync_existing_positions(state.entry_time, state.highest_prices)
 
@@ -232,7 +299,56 @@ async def run_trading_mode():
                     logger.error("🚨 MAX DRAWDOWN HIT - Stopping trading")
                     break
 
+            # ── Daily/Session Loss Limit Kill-Switch ────────────────────────────
+            # When realized losses exceed DAILY_LOSS_LIMIT%, the bot must
+            # (a) block all new entries, (b) flatten all open positions, and
+            # (c) break the trading loop entirely. This is a hard halt,
+            # not advisory — the bot will not resume until manually restarted.
+            session_loss_pct = None
+            if state.start_equity:
+                session_loss_pct = (equity - state.start_equity) / state.start_equity * 100
+                if session_loss_pct <= DAILY_LOSS_LIMIT:
+                    logger.critical(
+                        f"🚨 DAILY LOSS LIMIT HIT: Session loss {session_loss_pct:.2f}% "
+                        f"<= threshold {DAILY_LOSS_LIMIT:.2f}%. "
+                        f"Emergency flattening all positions and halting."
+                    )
+                    if send_discord_alert:
+                        try:
+                            await asyncio.to_thread(
+                                send_discord_alert,
+                                f"🚨 BOT HALT — Daily loss limit triggered: {session_loss_pct:.2f}% loss"
+                            )
+                        except Exception as e:
+                            logger.warning(f"Discord alert failed: {e}")
+
+                    # Force-close all open positions
+                    current_positions_for_kill = await get_all_positions_async()
+                    for symbol, p in current_positions_for_kill.items():
+                        if float(p["qty"]) == 0:
+                            continue
+                        avg_entry = float(p["avg_entry"])
+                        price = float(p["current_price"])
+                        try:
+                            success = await place_order(
+                                denormalize_symbol(symbol), OrderSide.SELL,
+                                float(p["qty"]), price, avg_entry=avg_entry
+                            )
+                            if success:
+                                logger.info(f"  📉 Kill-switch: closed {symbol} at ${price:.4f}")
+                            else:
+                                logger.error(f"  ❌ Kill-switch: FAILED closing {symbol} — will retry next cycle")
+                                # Don't mark pending exit; we need this to close next cycle
+                        except Exception as e:
+                            logger.error(f"  ❌ Kill-switch: exception closing {symbol}: {e}")
+
+                    logger.critical("🛑 Bot halted. Manual restart required after reviewing losses.")
+                    break
+
             current_positions   = await get_all_positions_async()
+            # Record success for circuit breaker (if it was previously open/failing)
+            circuit_breaker.record_success()
+
             # Exclude true dust (< MIN_POSITION_USD) from open_count so they
             # don't block new entries when they can't be sold anyway.
             open_count          = sum(1 for p in current_positions.values() if p["market_value"] >= MIN_POSITION_USD)
@@ -260,6 +376,14 @@ async def run_trading_mode():
 
             buys_allowed            = True
             running_portfolio_value = total_value  # Position exposure only
+
+            # ── Circuit Breaker: block new entries if exchange is degraded ─────
+            if circuit_breaker.is_tripped():
+                logger.warning(
+                    f"🔌 Circuit breaker is OPEN — blocking new entries. "
+                    f"(Exits/position closes still allowed for risk reduction.)"
+                )
+                buys_allowed = False
 
             if total_value >= max_portfolio_value:
                 logger.warning(f"Position exposure ${total_value:.2f} >= cap ${max_portfolio_value:.2f} (equity=${equity:.2f})")
@@ -648,6 +772,7 @@ async def run_trading_mode():
             # bot would just log this same generic line forever every 30s
             # while looking "alive" in the logs.
             logger.exception(f"Critical loop error: {e}")
+            circuit_breaker.record_failure()
             await asyncio.sleep(30)
 
 
