@@ -306,6 +306,29 @@ if __name__ == "__main__":
         fill_delay_steps=2,
     ))
 
+    # Scenario D: 10% DROP THEN 24h RECOVERY (matches your recent real market)
+    # Crash hits -10% in 30min, then slowly recovers over 24h. Tests whether
+    # bot exits too early on the stop-loss and misses the recovery, vs. holding
+    # through the valley.
+    drop_then_recovery_schedule = [
+        (0.01, -2.0),
+        (0.02, -4.0),
+        (0.03, -6.0),
+        (0.04, -8.0),
+        (0.05, -10.0),
+        (1.0,  -9.0),
+        (2.0,  -7.0),
+        (4.0,  -5.0),
+        (8.0,  -3.0),
+        (12.0, -1.5),
+        (24.0, -0.5),
+    ]
+    results.append(run_test(
+        symbols_10, drop_then_recovery_schedule,
+        max_drawdown_threshold_pct=12.0,
+        label="10% drop then 24h recovery (your recent market pattern)",
+    ))
+
     print(f"\n{'='*70}\nSUMMARY\n{'='*70}")
     for r in results:
         status = "PASS" if r["passed"] else "FAIL"
