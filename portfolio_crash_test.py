@@ -11,119 +11,103 @@ max hold, signal decay) so results are apples-to-apples with your earlier
 single-position table, then aggregates PnL across the portfolio and checks
 max portfolio drawdown against a threshold.
 
-Wiring in your real bot logic:
-    The `check_exit()` below mirrors your real exit_logic.evaluate_exit()
-    signature. To use the real function, uncomment the import and replace the
-    stub body. Everything else (crash generator, portfolio aggregation,
-    drawdown, pass/fail, report) works unchanged as long as check_exit()
-    keeps the same signature and return shape.
+--------------------------------------------------------------------------
+HOW TO WIRE IN YOUR REAL BOT LOGIC
+--------------------------------------------------------------------------
+Replace `check_exit()` below with a call into your actual bot's exit/stop
+logic. Everything else (crash generator, portfolio aggregation, drawdown,
+pass/fail, report) will work unchanged as long as `check_exit()` keeps the
+same signature and return shape.
 """
 
 from dataclasses import dataclass, field
 from typing import Optional
-import statistics
 
 
 # ---------------------------------------------------------------------------
-# 0. CONFIG — mirrors config.py constants your bot actually uses
+# TOGGLE: flip this to True once real_check_exit() below is wired up to
+# your actual bot's stop-loss / exit logic. While False, the placeholder
+# logic (time-decay stop, signal decay, max hold) is used instead.
 # ---------------------------------------------------------------------------
-
-MAX_HOLD_HOURS             = 4.0
-MIN_HOLD_HOURS_BEFORE_SIGNAL = 0.5
-STOP_LOSS_PCT              = 0.03    # 3%
-PROFIT_TARGET_PCT          = 0.06    # 6%
-SELL_SIGNAL                = 0.40    # trigger signal-exit when signal drops below this
-TRAILING_STOP_ATR_MULTIPLIER   = 0.5
-MIN_TRAILING_STOP_PCT        = 0.005  # 0.5%
-MAX_TRAILING_STOP_PCT        = 0.03   # 3%
-
-# Regime offsets (from config.py get_regime_params)
-REGIME_OFFSETS = {
-    "wild":   {"tp": 0.03, "sl": 0.045, "sell_offset": -0.03},
-    "normal": {"tp": PROFIT_TARGET_PCT, "sl": STOP_LOSS_PCT, "sell_offset": 0},
-    "quiet":  {"tp": 0.015, "sl": 0.02, "sell_offset": 0.02},
-}
+USE_REAL_EXIT_LOGIC = False
 
 
 # ---------------------------------------------------------------------------
-# 1. PER-POSITION EXIT LOGIC
-#    This mirrors your real exit_logic.evaluate_exit().
-#    Set USE_REAL_EXIT_LOGIC = True to import the real one instead.
+# 1. PER-POSITION EXIT LOGIC (mirrors your Scenario-1 rules)
+#    Swap this out for your real bot's stop-loss / exit function.
 # ---------------------------------------------------------------------------
 
-USE_REAL_EXIT_LOGIC = False  # flip to True to use your real evaluate_exit
+def time_decay_stop_pct(hours_held: float) -> float:
+    """Stop-loss tightens over time: -3% -> -2.25% @1h -> -1.5% @2h+."""
+    if hours_held >= 2.0:
+        return -1.5
+    if hours_held >= 1.0:
+        return -2.25
+    return -3.0
 
-if USE_REAL_EXIT_LOGIC:
-    from exit_logic import evaluate_exit as _real_evaluate_exit
-    from money import pct_change_x100
 
-    def check_exit(
-        hours_held: float,
-        pnl_pct: float,        # fractional PnL, e.g. -0.03 == -3%
-        avg_entry: float,
-        price: float,
-        highest_seen: float,
-        signal: float,
-        regime: str = "normal",
-        atr_pct: float = 1.5,
-    ) -> Optional[str]:
-        """Delegates to your real exit_logic.evaluate_exit()."""
-        params = REGIME_OFFSETS.get(regime, REGIME_OFFSETS["normal"])
-        decision = _real_evaluate_exit(
-            avg_entry=avg_entry,
-            price=price,
-            highest_seen=highest_seen,
-            held_hours=hours_held,
-            signal=signal,
-            regime=regime,
-            atr_pct=atr_pct,
-            profit_target_pct=params["tp"],
-            stop_loss_pct=params["sl"],
-            sell_signal=SELL_SIGNAL + params["sell_offset"],
-            max_hold_hours=MAX_HOLD_HOURS,
-            min_hold_hours_before_signal=MIN_HOLD_HOURS_BEFORE_SIGNAL,
-            trailing_stop_atr_multiplier=TRAILING_STOP_ATR_MULTIPLIER,
-            min_trailing_stop_pct=MIN_TRAILING_STOP_PCT,
-            max_trailing_stop_pct=MAX_TRAILING_STOP_PCT,
-        )
-        return decision.exit_reason
-else:
-    def time_decay_stop_pct(hours_held: float, stop_loss_pct: float = STOP_LOSS_PCT) -> float:
-        """Stop-loss tightens over time: -3% -> -2.25% @1h -> -1.5% @2h+."""
-        if hours_held >= 2.0:
-            return stop_loss_pct * 0.5
-        if hours_held >= 1.0:
-            return stop_loss_pct * 0.75
-        return stop_loss_pct
+def signal_decay(hours_held: float, initial_signal: float = 0.60) -> float:
+    """Rough model of ML signal decaying as a position sours (from your data)."""
+    return max(0.0, initial_signal - 0.05 * (hours_held / 0.5))
 
-    def check_exit(
-        hours_held: float,
-        pnl_pct: float,
-        avg_entry: float = 100.0,
-        price: float = 100.0,
-        highest_seen: float = 100.0,
-        signal: float = 0.50,
-        regime: str = "normal",
-        atr_pct: float = 1.5,
-    ) -> Optional[str]:
-        """
-        Returns exit reason string if the position should be closed this step,
-        else None. pnl_pct is fractional (e.g. -0.03 == -3% loss).
-        """
-        params = REGIME_OFFSETS.get(regime, REGIME_OFFSETS["normal"])
-        stop_loss_pct = params["sl"]
 
-        stop = time_decay_stop_pct(hours_held, stop_loss_pct)
-        if pnl_pct <= -stop:
-            return f"STOP_LOSS (time-decay at -{stop*100:.1f}%)"
+def placeholder_check_exit(hours_held: float, pnl_pct: float, trend: str = "down") -> Optional[str]:
+    """
+    Returns exit reason string if the position should be closed this step,
+    else None. pnl_pct is the position's PnL in percent (negative = loss).
+    """
+    stop = time_decay_stop_pct(hours_held)
+    if pnl_pct <= stop:
+        return f"STOP_LOSS (time-decay {stop:.2f}%)"
 
-        if hours_held >= MIN_HOLD_HOURS_BEFORE_SIGNAL and signal < SELL_SIGNAL + params["sell_offset"]:
-            return "SIGNAL_EXIT"
+    sig = signal_decay(hours_held)
+    if hours_held >= 0.5 and sig < 0.45:
+        return "SIGNAL_EXIT (ML signal < 0.45)"
 
-        if hours_held >= MAX_HOLD_HOURS:
-            return "MAX_HOLD"
+    if hours_held >= 4.0:
+        return "MAX_HOLD (4h forced exit)"
 
-        return None
+    return None
+
+
+def real_check_exit(hours_held: float, pnl_pct: float, trend: str = "down") -> Optional[str]:
+    """
+    *** FILL THIS IN WITH YOUR ACTUAL BOT'S EXIT LOGIC ***
+
+    Same contract as placeholder_check_exit(): given how long the position
+    has been held (hours) and its current PnL in percent, return a string
+    describing why to exit (e.g. "STOP_LOSS", "SIGNAL_EXIT", "MAX_HOLD"),
+    or None if it should stay open.
+
+    If your real function needs more inputs than hours_held/pnl_pct
+    (e.g. ATR, ML signal value, regime, trend), add them as parameters
+    here AND thread them through in run_correlated_crash() below where
+    check_exit(...) is called.
+
+    Example of wiring in an imported bot module:
+
+        from my_bot.risk import get_exit_signal
+
+        def real_check_exit(hours_held, pnl_pct, trend="down"):
+            decision = get_exit_signal(
+                time_held_hours=hours_held,
+                unrealized_pnl_pct=pnl_pct,
+                trend=trend,
+            )
+            return decision.reason if decision.should_exit else None
+    """
+    raise NotImplementedError(
+        "real_check_exit() is not wired up yet. Fill in this function with "
+        "your bot's actual exit logic, then it will be used automatically "
+        "since USE_REAL_EXIT_LOGIC = True."
+    )
+
+
+def check_exit(hours_held: float, pnl_pct: float, trend: str = "down") -> Optional[str]:
+    """Dispatches to real or placeholder exit logic based on the toggle above."""
+    if USE_REAL_EXIT_LOGIC:
+        return real_check_exit(hours_held, pnl_pct, trend=trend)
+    return placeholder_check_exit(hours_held, pnl_pct, trend=trend)
 
 
 # ---------------------------------------------------------------------------
@@ -165,34 +149,23 @@ def run_correlated_crash(
             if pos.closed:
                 continue
             pos.hours_held = hours_elapsed
-            # crash_schedule uses percentage values (e.g. -5 for -5%); check_exit
-            # expects fractional PnL (e.g. -0.05)
-            pnl_pct = market_drop_pct / 100.0
-            pos.pnl_history.append((hours_elapsed, market_drop_pct))
+            pnl_pct = market_drop_pct  # fully correlated: bot's move = market's move
+            pos.pnl_history.append((hours_elapsed, pnl_pct))
 
             # if an exit signal already fired earlier and its delay has elapsed, fill now
             if pos.symbol in pending_exit_idx and i >= pending_exit_idx[pos.symbol] + fill_delay_steps:
                 pos.closed = True
-                pos.exit_pnl_pct = market_drop_pct  # filled at THIS step's (worse) price
+                pos.exit_pnl_pct = pnl_pct  # filled at THIS step's (worse) price
                 continue
 
             if pos.symbol not in pending_exit_idx:
-                reason = check_exit(
-                    hours_held=pos.hours_held,
-                    pnl_pct=pnl_pct,
-                    avg_entry=pos.entry_price,
-                    price=pos.entry_price * (1 + pnl_pct),
-                    highest_seen=max(pos.entry_price, pos.entry_price * (1 + pnl_pct)),
-                    signal=0.50,
-                    regime="normal",
-                    atr_pct=1.5,
-                )
+                reason = check_exit(pos.hours_held, pnl_pct)
                 if reason:
                     pos.exit_reason = reason
                     pending_exit_idx[pos.symbol] = i
                     if fill_delay_steps == 0:
                         pos.closed = True
-                        pos.exit_pnl_pct = market_drop_pct
+                        pos.exit_pnl_pct = pnl_pct
 
     # Any position never triggered an exit within the schedule: mark as
     # "still open" at the final drop level (worst case for the report).
