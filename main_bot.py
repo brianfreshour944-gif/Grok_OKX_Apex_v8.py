@@ -331,7 +331,7 @@ async def run_trading_mode():
                 position_size_multiplier = 1.0  # regime_flag removed (was Windows-only path)
 
                 signal = signals.get(symbol, 0.5)
-                state.state.state.latest_signals[symbol] = signal
+                state.latest_signals[symbol] = signal
                 # FORCE LOG AT INFO LEVEL - this will appear 100%
                 logger.info(
                     f"🔬 TEST | Asset: {symbol} | ML Signal: {signal:.4f} | "
@@ -425,7 +425,7 @@ async def run_trading_mode():
                                 logger.error(f"Discord alert failed: {t.exception()}")
                                 if not t.cancelled() and t.exception() else None
                             ))
-                            state.state.cooldown_until[symbol] = now + COOLDOWN_SECONDS_SELL
+                            state.cooldown_until[symbol] = now + COOLDOWN_SECONDS_SELL
                             mark_pending_exit(symbol)
                             # Step 0: record the realized outcome paired with
                             # this position's decision-time context. The
@@ -456,7 +456,7 @@ async def run_trading_mode():
 
                 # ── ENTRY ──────────────────────────────────────────────────────
                 # Skip entries if this symbol is on cooldown (e.g. recently sold/bought)
-                if now < state.state.cooldown_until.get(symbol, 0.0):
+                if now < state.cooldown_until.get(symbol, 0.0):
                     await asyncio.sleep(2)
                     continue
 
@@ -577,9 +577,9 @@ async def run_trading_mode():
                             logger.error(f"Discord alert failed: {t.exception()}")
                             if not t.cancelled() and t.exception() else None
                         ))
-                        state.state.cooldown_until[symbol]   = now + COOLDOWN_SECONDS_BUY
-                        state.state.entry_time[symbol]        = now
-                        state.state.highest_prices[symbol]    = price
+                        state.cooldown_until[symbol]   = now + COOLDOWN_SECONDS_BUY
+                        state.entry_time[symbol]        = now
+                        state.highest_prices[symbol]    = price
                         running_portfolio_value  += trade_value
                         open_count               += 1
                         # Step 0: snapshot the EXACT feature vector + context
