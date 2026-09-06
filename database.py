@@ -267,6 +267,8 @@ def backfill_trade_if_missing(order) -> bool:
                             or getattr(order, "qty", 0) or 0)
                 fill_price = getattr(order, "filled_avg_price", None)
                 fill_price = float(fill_price) if fill_price else None
+                # NOTE: alpaca-py 0.33.0 Order model has no 'commission' field;
+                # fees are not available from order objects.
                 fee = float(getattr(order, "commission", None) or 0.0)
                 side = str(getattr(order, "side", "") or "")
                 symbol = str(getattr(order, "symbol", "") or "")

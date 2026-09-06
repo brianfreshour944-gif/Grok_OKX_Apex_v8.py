@@ -24,6 +24,7 @@ from config import (
     TRAILING_STOP_ATR_MULTIPLIER, MIN_TRAILING_STOP_PCT, MAX_TRAILING_STOP_PCT,
     DYNAMIC_UNIVERSE_CANDIDATES, UNIVERSE_SIZE, UNIVERSE_REFRESH_SECONDS,
     get_regime_params, fmt_price, trading_client,
+    DISCORD_WEBHOOK_URL,
 )
 from database import report_equity, init_db, save_bot_state, load_bot_state, backfill_trade_if_missing, vacuum_full_if_needed
 from data_feeds import get_clean_ohlcv_dataframe, get_orderbook_with_retry, scan_stable_assets
@@ -313,10 +314,9 @@ async def run_trading_mode():
                         f"<= threshold {DAILY_LOSS_LIMIT:.2f}%. "
                         f"Emergency flattening all positions and halting."
                     )
-                    if send_discord_alert:
+                    if DISCORD_WEBHOOK_URL:
                         try:
-                            await asyncio.to_thread(
-                                send_discord_alert,
+                            await send_discord_alert(
                                 f"🚨 BOT HALT — Daily loss limit triggered: {session_loss_pct:.2f}% loss"
                             )
                         except Exception as e:

@@ -116,8 +116,9 @@ async def place_order(symbol: str, side: OrderSide, qty: float, price: float = N
                 if filled_qty and float(filled_qty) > 0:
                     if hasattr(filled_order, 'filled_avg_price') and filled_order.filled_avg_price:
                         actual_fill_price = float(filled_order.filled_avg_price)
-                    if hasattr(filled_order, 'commission') and filled_order.commission:
-                        actual_fee = float(filled_order.commission)
+                    # NOTE: alpaca-py 0.33.0 Order model has no 'commission' field.
+                    # Fee data is not accessible via the TradingClient order objects.
+                    # actual_fee remains 0.0 — fees are not currently captured.
                     break
 
                 await asyncio.sleep(FILL_POLL_INTERVAL)
@@ -126,8 +127,7 @@ async def place_order(symbol: str, side: OrderSide, qty: float, price: float = N
             if filled_order is not None:
                 if actual_fill_price is None and hasattr(filled_order, 'filled_avg_price') and filled_order.filled_avg_price:
                     actual_fill_price = float(filled_order.filled_avg_price)
-                if actual_fee == 0.0 and hasattr(filled_order, 'commission') and filled_order.commission:
-                    actual_fee = float(filled_order.commission)
+                # NOTE: alpaca-py 0.33.0 Order model has no 'commission' field.
 
         except Exception as fill_err:
             logger.warning(f"Could not fetch fill details for order {order.id}: {fill_err}")

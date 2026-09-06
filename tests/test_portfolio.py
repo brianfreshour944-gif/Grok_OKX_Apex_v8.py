@@ -8,7 +8,7 @@ import pytest
 from portfolio import (
     normalize_symbol, denormalize_symbol, calculate_kelly_multiplier,
     sell_largest_position, swap_weakest_position, sync_existing_positions,
-    sell_retry_cooldown, pending_exit_until, has_pending_exit, mark_pending_exit,
+    _portfolio_state, has_pending_exit, mark_pending_exit,
 )
 from conftest import run_async
 
@@ -16,20 +16,18 @@ from conftest import run_async
 @pytest.fixture(autouse=True)
 def _clear_portfolio_module_state():
     """
-    sell_retry_cooldown and pending_exit_until are module-level dicts in
-    portfolio.py, not per-call state -- without clearing them between tests,
-    a symbol marked pending in one test (e.g. after a successful sell)
-    silently short-circuits a later test's sell_largest_position()/
-    swap_weakest_position() call for the same symbol, since it looks like
-    a sell is already in flight. This bit exactly once while adding
-    pending_exit_until: two tests started failing for a reason that had
-    nothing to do with what they were testing.
+    sell_retry_cooldown and pending_exit_until live on the _portfolio_state
+    singleton in portfolio.py, not as module-level dicts -- without
+    clearing them between tests, a symbol marked pending in one test
+    (e.g. after a successful sell) silently short-circuits a later test's
+    sell_largest_position()/swap_weakest_position() call for the same
+    symbol, since it looks like a sell is already in flight.
     """
-    sell_retry_cooldown.clear()
-    pending_exit_until.clear()
+    _portfolio_state.sell_retry_cooldown.clear()
+    _portfolio_state.pending_exit_until.clear()
     yield
-    sell_retry_cooldown.clear()
-    pending_exit_until.clear()
+    _portfolio_state.sell_retry_cooldown.clear()
+    _portfolio_state.pending_exit_until.clear()
 
 
 def test_normalize_symbol():
@@ -84,8 +82,8 @@ def _mock_position(symbol, market_value, qty, current_price, avg_entry_price):
     )
 
 
-def _mock_filled_order(order_id="oid", filled_avg_price=None, commission="0.0"):
-    return MagicMock(id=order_id, filled_avg_price=filled_avg_price, commission=commission)
+def _mock_filled_order(order_id="oid", filled_avg_price=None):
+    return MagicMock(id=order_id, filled_avg_price=filled_avg_price)
 
 
 def test_sell_largest_position_sells_biggest_by_market_value(mock_trading_client):
@@ -115,7 +113,7 @@ def test_sell_largest_position_respects_retry_cooldown(mock_trading_client):
     import time
     pos = _mock_position("BTCUSD", "5000", "0.1", "50000", "48000")
     mock_trading_client.get_all_positions.return_value = [pos]
-    sell_retry_cooldown["BTC/USD"] = time.time()  # just failed a moment ago
+    _portfolio_state.sell_retry_cooldown["BTC/USD"] = time.time()  # just failed a moment ago
 
     run_async(sell_largest_position())
 
@@ -129,7 +127,7 @@ def test_sell_largest_position_sets_retry_cooldown_on_failure(mock_trading_clien
 
     run_async(sell_largest_position())
 
-    assert "BTC/USD" in sell_retry_cooldown
+    assert "BTC/USD" in _portfolio_state.sell_retry_cooldown
 
 
 # ── pending-exit guard: prevents duplicate SELLs on a still-unfilled position ──
