@@ -19,6 +19,7 @@ from config import (
     logger, BOT_NAME, SEQUENCE_LEN, MODEL_PATH,
     MAX_OPEN_POSITIONS, MAX_DRAWDOWN_STOP, DAILY_LOSS_LIMIT, MAX_HOLD_HOURS,
     BASE_RISK_PERCENT, MIN_POSITION_USD, MIN_ORDER_USD, MAX_SINGLE_TRADE_USD,
+    MAX_POSITION_PCT,
     MIN_HOLD_HOURS_BEFORE_SIGNAL,
     COOLDOWN_SECONDS_BUY, COOLDOWN_SECONDS_SELL, SLEEP_PER_LOOP,
     TRAILING_STOP_ATR_MULTIPLIER, MIN_TRAILING_STOP_PCT, MAX_TRAILING_STOP_PCT,
@@ -299,6 +300,25 @@ async def run_trading_mode():
                 if drawdown < MAX_DRAWDOWN_STOP:
                     logger.error("🚨 MAX DRAWDOWN HIT - Stopping trading")
                     break
+
+            # ── Drawdown-based risk tapering ───────────────────────────────────────
+            # When portfolio drawdown approaches MAX_DRAWDOWN_STOP, proactively
+            # tighten stops and reduce position sizes BEFORE the hard halt.
+            # This prevents a single bad session from wiping out a large chunk
+            # of equity before the kill-switch fires.
+            #   - At -5% drawdown: tighten stop_loss by 25%, reduce pos size 30%
+            #   - At -7% drawdown: tighten stop_loss by 50%, reduce pos size 50%
+            risk_taper = 1.0
+            stop_taper = 1.0
+            if drawdown is not None:
+                if drawdown < -7.0:
+                    risk_taper = 0.5   # 50% position size reduction
+                    stop_taper = 0.5   # 50% tighter stop loss
+                    logger.warning(f"⚠️ DRAWDOWN AT {drawdown:.1f}% — risk taper: 50% size, 50% tighter stops")
+                elif drawdown < -5.0:
+                    risk_taper = 0.7   # 30% position size reduction
+                    stop_taper = 0.75  # 25% tighter stop loss
+                    logger.warning(f"⚠️ DRAWDOWN AT {drawdown:.1f}% — risk taper: 30% size, 25% tighter stops")
 
             # ── Daily/Session Loss Limit Kill-Switch ────────────────────────────
             # When realized losses exceed DAILY_LOSS_LIMIT%, the bot must
@@ -658,11 +678,26 @@ async def run_trading_mode():
                         profit_target_pct=regime_params["profit_target_pct"],
                         stop_loss_pct=regime_params["stop_loss_pct"]
                     )
-                    
+
+                    # Apply drawdown-based risk taper when portfolio drawdown
+                    # is approaching the hard halt threshold.
                     adjusted_risk = calculate_adjusted_risk(equity, atr_pct) * position_size_multiplier * kelly_mult
+                    if drawdown is not None:
+                        adjusted_risk *= risk_taper * stop_taper
                     qty           = money_qty(adjusted_risk / price)
                     trade_value   = min(mul(qty, price), MAX_SINGLE_TRADE_USD)
-                    qty           = div(trade_value, price)
+                    # Enforce concentration cap: no single position may exceed
+                    # MAX_POSITION_PCT of total equity, preventing a single asset
+                    # from dominating portfolio drawdown during flash crashes.
+                    position_cap  = mul(equity, MAX_POSITION_PCT)
+                    if trade_value > position_cap:
+                        trade_value = position_cap
+                        qty         = div(trade_value, price)
+                        logger.info(
+                            f"🔒 Capped {symbol} to {MAX_POSITION_PCT*100:.0f}% of equity: "
+                            f"${trade_value:.2f} (was ${mul(qty, price):.2f})"
+                        )
+                    qty = div(trade_value, price)
 
                     if trade_value < MIN_ORDER_USD:
                         logger.info(

@@ -69,9 +69,17 @@ DAILY_LOSS_LIMIT     = -3.0     # % of starting equity lost in a session before 
 MAX_OPEN_POSITIONS           = 10
 MAX_HOLD_HOURS               = 4.0
 PROFIT_TARGET_PCT            = 0.02
-STOP_LOSS_PCT                = 0.03
-BUY_SIGNAL                   = float(os.getenv("BUY_SIGNAL", 0.51))
-SELL_SIGNAL                  = float(os.getenv("SELL_SIGNAL", 0.45))
+STOP_LOSS_PCT                = 0.02   # tightened from 0.03 — flash crashes + fill lag on
+                                       # concentrated positions (40% of capital) can move
+                                       # 3%+ before a fill completes; 2% keeps worst-case
+                                       # portfolio drawdown under ~8% even with 2-step lag
+MAX_POSITION_PCT             = 0.20   # concentration cap: no single position may exceed
+                                       # 20% of total equity. Prevents a single position
+                                       # from dominating portfolio drawdown during a flash
+                                       # crash — 20% × 5% drop = 1% portfolio, vs. old
+                                       # 40% × 5% = 2% + fill lag = up to 8% drawdown
+BUY_SIGNAL                   = float(os.getenv("BUY_SIGNAL", "0.51"))
+SELL_SIGNAL                  = float(os.getenv("SELL_SIGNAL", "0.45"))
 MIN_POSITION_USD             = 5.0   # ignore dust positions below this
 MIN_ORDER_USD                = 10.0  # Alpaca minimum crypto order notional
 MIN_HOLD_HOURS_BEFORE_SIGNAL = 0.5   # hold at least this long before signal-exit
@@ -85,8 +93,14 @@ MIN_HOLD_HOURS_BEFORE_SIGNAL = 0.5   # hold at least this long before signal-exi
 # quiet ones (without going below the floor, which would chop out of a
 # winning position on pure noise).
 TRAILING_STOP_ATR_MULTIPLIER = 0.5
-MIN_TRAILING_STOP_PCT        = 0.005  # 0.5% floor
-MAX_TRAILING_STOP_PCT        = 0.03   # 3% ceiling
+MIN_TRAILING_STOP_PCT        = 0.01   # raised from 0.5% — at 0.5% the trailing stop fires
+                                       # on normal bar-to-bar noise (ATR% at 2.0 was
+                                       # reproducing the old 1.0%, now 0.5% floor was
+                                       # too tight and chopped winners on noise
+MAX_TRAILING_STOP_PCT        = 0.02  # tightened from 3% — caps how much profit a
+                                       # winning position can give back during a
+                               #       flash crash before the trailing stop catches it,
+                                       # critical for concentrated positions
 
 # ── Model / data ───────────────────────────────────────────────────────────────
 SEQUENCE_LEN = 32
@@ -123,7 +137,7 @@ def get_regime_params(regime: str, base_buy=None, base_sell=None) -> dict:
         base_sell = SELL_SIGNAL
         
     offsets = {
-        "wild":   {"buy_offset":  0.06, "sell_offset": -0.03, "tp": 0.03, "sl": 0.045},
+        "wild":   {"buy_offset":  0.06, "sell_offset": -0.03, "tp": 0.03, "sl": 0.03},
         "normal": {"buy_offset":  0.00, "sell_offset":  0.00, "tp": PROFIT_TARGET_PCT, "sl": STOP_LOSS_PCT},
         "quiet":  {"buy_offset": -0.04, "sell_offset":  0.02, "tp": 0.015, "sl": 0.02},
     }

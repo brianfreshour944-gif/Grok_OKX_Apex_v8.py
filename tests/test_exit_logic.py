@@ -74,18 +74,18 @@ def test_pnl_pct_matches_actual_price_move_at_various_magnitudes(pct_move):
 # ── Time-decay stop loss tightening ──
 
 def test_stop_loss_tightens_after_one_hour():
-    # 2.6% drop would NOT trip the full 3% stop loss...
-    decision = _evaluate(avg_entry=100.0, price=97.4, held_hours=0.5)
+    # 1.8% drop would NOT trip the full 2% stop loss...
+    decision = _evaluate(avg_entry=100.0, price=98.2, held_hours=0.5)
     assert decision.exit_reason is None
-    # ...but DOES trip the 0.75x-tightened 2.25% stop after 1h held.
-    decision = _evaluate(avg_entry=100.0, price=97.4, held_hours=1.5)
+    # ...but DOES trip the 0.75x-tightened 1.5% stop after 1h held.
+    decision = _evaluate(avg_entry=100.0, price=98.2, held_hours=1.5)
     assert decision.exit_reason is not None
     assert "Stop loss" in decision.exit_reason
 
 
 def test_stop_loss_halves_after_two_hours():
-    # 2% drop trips the 0.5x-tightened 1.5% stop after 2h held.
-    decision = _evaluate(avg_entry=100.0, price=98.0, held_hours=2.5)
+    # 1.2% drop trips the 0.5x-tightened 1.0% stop after 2h held.
+    decision = _evaluate(avg_entry=100.0, price=98.8, held_hours=2.5)
     assert decision.exit_reason is not None
     assert decision.dynamic_sl_pct == pytest.approx(STOP_LOSS_PCT * 0.5)
 

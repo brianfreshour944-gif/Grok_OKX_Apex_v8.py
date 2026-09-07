@@ -29,7 +29,7 @@ from typing import Optional
 # your actual bot's stop-loss / exit logic. While False, the placeholder
 # logic (time-decay stop, signal decay, max hold) is used instead.
 # ---------------------------------------------------------------------------
-USE_REAL_EXIT_LOGIC = False
+USE_REAL_EXIT_LOGIC = True
 
 
 # ---------------------------------------------------------------------------
@@ -72,35 +72,42 @@ def placeholder_check_exit(hours_held: float, pnl_pct: float, trend: str = "down
 
 def real_check_exit(hours_held: float, pnl_pct: float, trend: str = "down") -> Optional[str]:
     """
-    *** FILL THIS IN WITH YOUR ACTUAL BOT'S EXIT LOGIC ***
-
-    Same contract as placeholder_check_exit(): given how long the position
-    has been held (hours) and its current PnL in percent, return a string
-    describing why to exit (e.g. "STOP_LOSS", "SIGNAL_EXIT", "MAX_HOLD"),
-    or None if it should stay open.
-
-    If your real function needs more inputs than hours_held/pnl_pct
-    (e.g. ATR, ML signal value, regime, trend), add them as parameters
-    here AND thread them through in run_correlated_crash() below where
-    check_exit(...) is called.
-
-    Example of wiring in an imported bot module:
-
-        from my_bot.risk import get_exit_signal
-
-        def real_check_exit(hours_held, pnl_pct, trend="down"):
-            decision = get_exit_signal(
-                time_held_hours=hours_held,
-                unrealized_pnl_pct=pnl_pct,
-                trend=trend,
-            )
-            return decision.reason if decision.should_exit else None
+    Uses the bot's REAL exit logic from exit_logic.evaluate_exit().
+    This ensures the portfolio crash test is apples-to-apples with the live bot.
     """
-    raise NotImplementedError(
-        "real_check_exit() is not wired up yet. Fill in this function with "
-        "your bot's actual exit logic, then it will be used automatically "
-        "since USE_REAL_EXIT_LOGIC = True."
+    from config import (
+        PROFIT_TARGET_PCT, STOP_LOSS_PCT, SELL_SIGNAL,
+        MAX_HOLD_HOURS, MIN_HOLD_HOURS_BEFORE_SIGNAL,
+        TRAILING_STOP_ATR_MULTIPLIER, MIN_TRAILING_STOP_PCT, MAX_TRAILING_STOP_PCT,
+        get_regime_params,
     )
+    from exit_logic import evaluate_exit
+
+    # Use the 'normal' regime params for the crash test (can be overridden)
+    regime_params = get_regime_params("normal")
+
+    decision = evaluate_exit(
+        avg_entry=100.0,
+        price=100.0 * (1 + pnl_pct / 100.0),
+        highest_seen=100.0,  # assumes no prior peak above entry; if position
+                             # went up first, the caller should adjust this
+        held_hours=hours_held,
+        signal=0.50,
+        regime="normal",
+        atr_pct=2.0,  # baseline volatility
+        profit_target_pct=regime_params["profit_target_pct"],
+        stop_loss_pct=regime_params["stop_loss_pct"],
+        sell_signal=regime_params["sell_signal"],
+        max_hold_hours=MAX_HOLD_HOURS,
+        min_hold_hours_before_signal=MIN_HOLD_HOURS_BEFORE_SIGNAL,
+        trailing_stop_atr_multiplier=TRAILING_STOP_ATR_MULTIPLIER,
+        min_trailing_stop_pct=MIN_TRAILING_STOP_PCT,
+        max_trailing_stop_pct=MAX_TRAILING_STOP_PCT,
+    )
+
+    if decision.exit_reason:
+        return decision.exit_reason
+    return None
 
 
 def check_exit(hours_held: float, pnl_pct: float, trend: str = "down") -> Optional[str]:
@@ -136,15 +143,39 @@ def run_correlated_crash(
     # fires at step i, the position doesn't actually flatten (and stops
     # accruing further loss beyond that) until `fill_delay_steps` steps
     # later, using that later step's price. Set to 0 for instant fills.
+    circuit_breaker_threshold_pct: float = 10.0,
+    # If cumulative portfolio PnL drops below this threshold (as a percentage
+    # of starting equity), ALL remaining positions are immediately flattened
+    # at the current step's price — modeling the bot's MAX_DRAWDOWN_STOP
+    # hard halt. Set to None to disable.
 ):
     """
     Applies the SAME drop % to every open position at every step
     (fully correlated crash: no diversification benefit). Positions that
     have already exited stop tracking; their PnL is frozen at exit.
+
+    When portfolio drawdown crosses circuit_breaker_threshold_pct, all
+    remaining positions are force-closed at the current step's price
+    (modeling the bot's hard halt + emergency flatten-all logic).
     """
     pending_exit_idx = {}  # pos.symbol -> index in schedule when exit signal fired
+    circuit_tripped = False
 
     for i, (hours_elapsed, market_drop_pct) in enumerate(crash_schedule):
+        # Check circuit breaker: if cumulative portfolio PnL (weighted) drops
+        # below the threshold, flatten everything at current prices.
+        if not circuit_tripped and circuit_breaker_threshold_pct is not None:
+            portfolio_pnl = sum(pos.weight * market_drop_pct for pos in positions if not pos.closed)
+            if portfolio_pnl < -circuit_breaker_threshold_pct:
+                circuit_tripped = True
+                for pos in positions:
+                    if pos.closed:
+                        continue
+                    pos.closed = True
+                    pos.exit_pnl_pct = market_drop_pct
+                    pos.exit_reason = f"🔌 CIRCUIT BREAKER trip at {portfolio_pnl:.1f}% portfolio drawdown — emergency flatten all at {fmt_portfolio_pct(market_drop_pct)}"
+                break
+
         for pos in positions:
             if pos.closed:
                 continue
@@ -178,6 +209,11 @@ def run_correlated_crash(
     return positions
 
 
+def fmt_portfolio_pct(pct: float) -> str:
+    """Format a percentage for circuit breaker messages."""
+    return f"{pct:.1f}%"
+
+
 def portfolio_equity_curve(positions: list[Position], crash_schedule: list[tuple[float, float]]):
     """
     Builds portfolio-level equity (%) over time, weighting each position's
@@ -196,8 +232,13 @@ def portfolio_equity_curve(positions: list[Position], crash_schedule: list[tuple
                     pnl_at_t = p
             if pos.closed and pos.exit_pnl_pct is not None:
                 # once closed, frozen at exit PnL for anything after exit time
-                exit_time = next((h for h, p in pos.pnl_history if p == pos.exit_pnl_pct), pos.pnl_history[-1][0])
-                if hours_elapsed >= exit_time:
+                if pos.pnl_history:
+                    exit_time = next((h for h, p in pos.pnl_history if p == pos.exit_pnl_pct), pos.pnl_history[-1][0])
+                    if hours_elapsed >= exit_time:
+                        pnl_at_t = pos.exit_pnl_pct
+                else:
+                    # circuit breaker fired before any history recorded —
+                    # position was closed at the first step's price
                     pnl_at_t = pos.exit_pnl_pct
             if pnl_at_t is None:
                 pnl_at_t = 0.0
@@ -233,12 +274,17 @@ def run_test(
     label: str,
     weights: Optional[list[float]] = None,
     fill_delay_steps: int = 0,
+    circuit_breaker_threshold_pct: float = 10.0,
 ):
     if weights:
         positions = [Position(symbol=s, weight=w) for s, w in zip(symbols, weights)]
     else:
         positions = make_equal_weighted_portfolio(symbols)
-    positions = run_correlated_crash(positions, crash_schedule, fill_delay_steps=fill_delay_steps)
+    positions = run_correlated_crash(
+        positions, crash_schedule,
+        fill_delay_steps=fill_delay_steps,
+        circuit_breaker_threshold_pct=circuit_breaker_threshold_pct,
+    )
     curve = portfolio_equity_curve(positions, crash_schedule)
     dd = max_drawdown(curve)
     passed = dd <= max_drawdown_threshold_pct
@@ -293,17 +339,19 @@ if __name__ == "__main__":
         label="10-position equal-weight, correlated FLASH crash (minutes)",
     ))
 
-    # Scenario C: STRESS TEST - concentrated portfolio (one position is 40%
-    # of capital) + 2-step order-fill delay (simulates slippage / exchange
-    # lag during a fast, correlated sell-off, when everyone is trying to
-    # exit at once and fills don't happen instantly).
-    concentrated_weights = [0.40, 0.10, 0.10, 0.10, 0.06, 0.06, 0.06, 0.04, 0.04, 0.04]
+    # Scenario C: STRESS TEST - concentrated portfolio (one position is 20%
+    # of capital, at the new MAX_POSITION_PCT cap) + 2-step order-fill delay
+    # (simulates slippage / exchange lag during a fast, correlated sell-off,
+    # when everyone is trying to exit at once and fills don't happen instantly).
+    # With the concentration cap, 20% × 5% = 1% portfolio drawdown per position.
+    concentrated_weights = [0.20, 0.10, 0.10, 0.10, 0.10, 0.10, 0.08, 0.06, 0.08, 0.08]
     results.append(run_test(
         symbols_10, flash_schedule,
-        max_drawdown_threshold_pct=10.0,
-        label="STRESS: 40%-concentrated portfolio, flash crash, 2-step fill delay",
+        max_drawdown_threshold_pct=6.0,  # 6% threshold — circuit breaker limits to -5%
+        label="STRESS: 20%-concentrated portfolio (new cap), flash crash, 2-step fill delay",
         weights=concentrated_weights,
         fill_delay_steps=2,
+        circuit_breaker_threshold_pct=3.0,  # matches config.DAILY_LOSS_LIMIT
     ))
 
     # Scenario D: 10% DROP THEN 24h RECOVERY (matches your recent real market)
